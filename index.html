@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Grouse Cover Finder</title>
 <link rel="manifest" href="manifest.webmanifest">
-<meta name="theme-color" content="#234d3a">
+<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#161817" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,226 +14,364 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" type="image/png" href="icon-192.png">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
 <style>
+  /*
+   * The interface is neutral on purpose: the only saturated color on screen is the habitat
+   * ramp, so color always means "how good is the cover". Controls are ink on paper.
+   */
   :root {
-    --bg: #ffffff;
-    --panel: #ffffff;
-    --text: #1d2321;
-    --muted: #5d6763;
-    --line: #dde3e0;
-    --accent: #2f6b4f;
-    --accent-ink: #ffffff;
-    --chip: #eef3f0;
-    --shadow: 0 4px 18px rgba(0,0,0,.18);
+    --bg: #f6f5f1;
+    --panel: rgba(250, 249, 246, .93);
+    --solid: #faf9f6;
+    --text: #1a1c1b;
+    --muted: #666b67;
+    --line: rgba(20, 24, 22, .09);
+    --fill: rgba(20, 24, 22, .06);
+    --fill-2: rgba(20, 24, 22, .1);
+    --raised: #ffffff;
+    --ink: #1a1c1b;
+    --ink-text: #faf9f6;
+    --ok: #2c6a4c;
+    --warn: #a63d14;
+    --warn-bg: rgba(200, 84, 28, .11);
+    --here: #1d6fd6;
+    --shadow: 0 1px 2px rgba(20, 24, 22, .06), 0 12px 32px -8px rgba(20, 24, 22, .22);
+    --r: 16px;
     /* habitat ramp (low → high) */
     --s1: #fff1a8; --s2: #ffc95c; --s3: #f2913d; --s4: #d9482b; --s5: #8c1018;
+    color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #121614; --panel: #1a1f1d; --text: #e7ece9; --muted: #9aa5a0;
-      --line: #2e3633; --accent: #5fb38a; --accent-ink: #0d1411; --chip: #24302b;
-      --shadow: 0 4px 18px rgba(0,0,0,.5);
+      --bg: #161817; --panel: rgba(27, 29, 28, .93); --solid: #1d1f1e; --text: #eceeea; --muted: #a2a7a3;
+      --line: rgba(255, 255, 255, .1); --fill: rgba(255, 255, 255, .07); --fill-2: rgba(255, 255, 255, .12);
+      --raised: #3a3d3b; --ink: #eceeea; --ink-text: #161817; --ok: #7cc7a2; --warn: #ffab85;
+      --warn-bg: rgba(255, 140, 90, .14); --here: #6aaeff;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 12px 32px -8px rgba(0, 0, 0, .6);
+      color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
-    --bg: #121614; --panel: #1a1f1d; --text: #e7ece9; --muted: #9aa5a0;
-    --line: #2e3633; --accent: #5fb38a; --accent-ink: #0d1411; --chip: #24302b;
-    --shadow: 0 4px 18px rgba(0,0,0,.5);
+    --bg: #161817; --panel: rgba(27, 29, 28, .93); --solid: #1d1f1e; --text: #eceeea; --muted: #a2a7a3;
+    --line: rgba(255, 255, 255, .1); --fill: rgba(255, 255, 255, .07); --fill-2: rgba(255, 255, 255, .12);
+    --raised: #3a3d3b; --ink: #eceeea; --ink-text: #161817; --ok: #7cc7a2; --warn: #ffab85;
+    --warn-bg: rgba(255, 140, 90, .14); --here: #6aaeff;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 12px 32px -8px rgba(0, 0, 0, .6);
+    color-scheme: dark;
   }
+
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
-    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  #map { position: absolute; inset: 0; }
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; }
+  ::selection { background: var(--ink); color: var(--ink-text); }
+  :focus-visible { outline: 2px solid var(--text); outline-offset: 2px; border-radius: 6px; }
+  button, select, input { font: inherit; color: inherit; }
+  input[type=checkbox], input[type=range] { accent-color: var(--ink); }
+  [hidden] { display: none !important; }
+  #map { position: absolute; inset: 0; background: var(--bg); }
 
-  #panel { position: absolute; z-index: 1000; top: 12px; left: 12px; bottom: 12px; width: 320px;
-    background: var(--panel); border-radius: 12px; box-shadow: var(--shadow);
-    display: flex; flex-direction: column; overflow: hidden; }
-  #panel header { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
-  #panel h1 { font-size: 17px; margin: 0; letter-spacing: .2px; }
-  #status { color: var(--muted); font-size: 12.5px; margin-top: 4px; min-height: 18px; }
-  #panel .body { overflow-y: auto; padding: 4px 16px 16px; flex: 1; }
-  section { padding: 12px 0; border-bottom: 1px solid var(--line); }
-  section:last-child { border-bottom: 0; }
-  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 8px; }
-  .seg { display: flex; background: var(--chip); border-radius: 8px; padding: 3px; }
-  .seg button { flex: 1; border: 0; background: transparent; color: var(--text); padding: 6px 8px;
-    border-radius: 6px; font: inherit; cursor: pointer; }
-  .seg button.on { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
-  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
-  label.row { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
-  label.row input { margin: 0; }
-  .sw { width: 14px; height: 14px; border-radius: 3px; flex: none; border: 2px solid; }
-  select, input[type=range] { width: 100%; }
-  select { padding: 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: inherit; }
-  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
-  .btn { border: 1px solid var(--line); background: var(--chip); color: var(--text); padding: 6px 10px;
-    border-radius: 6px; font: inherit; font-size: 13px; cursor: pointer; }
-  .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
-  .ramp { display: flex; height: 10px; border-radius: 5px; overflow: hidden; margin: 6px 0 2px; }
+  /* Floating surfaces share one material. */
+  #panel, #here, .leaflet-bar, .hot-tip { background: var(--panel); box-shadow: var(--shadow);
+    -webkit-backdrop-filter: saturate(1.6) blur(22px); backdrop-filter: saturate(1.6) blur(22px); }
+  @media (prefers-reduced-transparency: reduce) { #panel, #here, .leaflet-bar { background: var(--solid); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+
+  /* ---- Panel ---- */
+  #panel { position: absolute; z-index: 1000; top: 12px; left: 12px; bottom: 12px; width: 340px;
+    border-radius: var(--r); display: flex; flex-direction: column; overflow: hidden; }
+  #panel header { padding: 18px 20px 14px; }
+  #panel h1 { font-size: 19px; line-height: 1.2; font-weight: 650; letter-spacing: -.015em; margin: 0; }
+  #status { color: var(--muted); font-size: 12.5px; margin-top: 3px; min-height: 18px; font-variant-numeric: tabular-nums; }
+  #panel .body { overflow-y: auto; padding: 0 20px 20px; flex: 1; scrollbar-width: thin; scrollbar-color: var(--fill-2) transparent;
+    overscroll-behavior: contain; }
+  section { padding: 16px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 13px; font-weight: 600; letter-spacing: -.005em; margin: 0 0 10px; }
+  .hint { color: var(--muted); font-size: 12.5px; line-height: 1.45; margin-top: 8px; text-wrap: pretty; }
+  .meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* Segmented control */
+  .seg { display: flex; background: var(--fill); border-radius: 10px; padding: 2px; gap: 2px; }
+  .seg button { flex: 1; border: 0; background: transparent; padding: 6px 8px; border-radius: 8px; cursor: pointer;
+    font-size: 13px; font-weight: 500; color: var(--muted); transition: background .18s, color .18s, box-shadow .18s; }
+  .seg button:hover { color: var(--text); }
+  .seg button.on { background: var(--raised); color: var(--text); font-weight: 600;
+    box-shadow: 0 1px 2px rgba(0,0,0,.1), 0 0 0 .5px rgba(0,0,0,.06); }
+
+  /* Buttons */
+  .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn { border: 0; background: var(--fill); padding: 7px 12px; border-radius: 9px; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: background .15s, transform .08s; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { background: var(--fill-2); }
+  .btn:active { transform: scale(.98); }
+  .btn.primary { background: var(--ink); color: var(--ink-text); font-weight: 600; }
+  .btn.primary:hover { opacity: .88; }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .btn.icon { padding: 7px; }
+  svg.i { width: 14px; height: 14px; flex: none; vertical-align: -2px; }
+
+  select { width: 100%; padding: 8px 10px; border-radius: 9px; border: 0; background: var(--fill); }
+  input[type=range] { width: 100%; margin: 6px 0 0; }
+
+  /* Score chip: the one place the ramp shows up in the chrome. */
+  .score { display: inline-block; min-width: 32px; padding: 2px 5px; border-radius: 6px; text-align: center; flex: none;
+    font-weight: 700; font-size: 13px; font-variant-numeric: tabular-nums; color: #1d1d1d; }
+
+  /* Statewide legend */
+  .field { display: flex; justify-content: space-between; align-items: baseline; margin-top: 14px; font-size: 13px; }
+  .field b { font-variant-numeric: tabular-nums; }
+  #hotLegend { display: grid; grid-template-columns: auto 1fr; gap: 10px 12px; align-items: center; margin-top: 14px; }
+  #hotLegend .k { font-size: 12px; color: var(--muted); }
+  #hotLegend[data-mode="flat"] .lg-h { display: none; }
+  .ramp { display: flex; height: 8px; border-radius: 4px; overflow: hidden; }
   .ramp span { flex: 1; }
-  .ramp-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); }
-  #top { list-style: none; margin: 0; padding: 0; }
-  #top li { display: flex; gap: 8px; align-items: center; padding: 6px 4px; border-radius: 6px; cursor: pointer; }
-  #top li:hover { background: var(--chip); }
-  #top .score { font-weight: 700; width: 30px; text-align: center; border-radius: 4px; padding: 1px 0; color: #1d1d1d; }
-  #top .meta { font-size: 12px; color: var(--muted); }
-  #toggle { display: none; }
-  #areas { list-style: none; margin: 8px 0; padding: 0; }
-  #areas li { display: flex; gap: 6px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
-  #areas li > span { flex: 1; }
-  #areas .meta { font-size: 12px; color: var(--muted); }
-  .btn:disabled { opacity: .5; }
-  .pop .warn, .warn { background: #fff3e0; color: #8a3b00; border-left: 3px solid #ff6f00; padding: 5px 8px; margin: 4px 0 6px; font-size: 12.5px; border-radius: 3px; }
-  .wgroup { font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 2px; }
-  .wrow { display: block; font-size: 13px; padding: 3px 0; }
-  .wrow i { color: var(--muted); font-style: normal; font-size: 11.5px; }
-  details > summary { cursor: pointer; list-style: none; }
+  .scale-labels { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 3px; }
+  .bars { display: flex; align-items: flex-end; gap: 3px; height: 22px; }
+  .bars span { flex: 1; background: var(--text); opacity: .78; border-radius: 1.5px 1.5px 0 0; }
+
+  /* Lists */
+  #top, #areas, ul.flushes { list-style: none; margin: 0; padding: 0; }
+  #top li, ul.flushes li { display: flex; gap: 10px; align-items: center; padding: 7px 8px; margin: 0 -8px; border-radius: 9px; cursor: pointer; }
+  #top li:hover, ul.flushes li:hover { background: var(--fill); }
+  #top li.meta { cursor: default; background: none; padding-left: 8px; }
+  #top .warn-i, .warn-i { color: var(--warn); }
+  ul.flushes { max-height: 220px; overflow-y: auto; margin-top: 8px; }
+  #areas { margin: 10px 0; }
+  #areas li { display: flex; gap: 6px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  #areas li > span { flex: 1; min-width: 0; }
+
+  /* Layers */
+  label.row { display: flex; align-items: center; gap: 10px; padding: 5px 0; cursor: pointer; font-size: 13px; line-height: 1.3; }
+  label.row input { margin: 0; width: 15px; height: 15px; flex: none; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; flex: none; border: 2px solid; }
+
+  /* Disclosure sections */
+  details > summary { cursor: pointer; list-style: none; display: flex; align-items: center; justify-content: space-between; margin: -4px 0; padding: 4px 0; }
   details > summary::-webkit-details-marker { display: none; }
-  details > summary h2 { display: inline; }
-  details > summary::after { content: ' ▸'; color: var(--muted); }
-  details[open] > summary::after { content: ' ▾'; }
+  details > summary h2 { margin: 0; }
+  details > summary::after { content: ''; width: 7px; height: 7px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted);
+    transform: rotate(-45deg); transition: transform .2s; margin-right: 3px; }
+  details[open] > summary::after { transform: rotate(45deg) translate(-2px, -2px); }
+  details[open] > summary { margin-bottom: 8px; }
+
+  /* Tune the model */
+  .wgroup { font-size: 12px; font-weight: 600; color: var(--muted); margin: 14px 0 2px; }
+  .wrow { display: block; font-size: 13px; padding: 4px 0; }
+  .wrow b { font-variant-numeric: tabular-nums; }
+  .wrow i { color: var(--muted); font-style: normal; font-size: 11.5px; }
+
+  /* onX waypoint picker */
   .wpgroup { border-top: 1px solid var(--line); padding: 4px 0; }
-  .wpgroup summary { padding: 4px 0; font-size: 13px; display: flex; align-items: center; gap: 6px; }
-  .wpgroup .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid #0003; }
-  label.wp { display: flex; gap: 6px; align-items: baseline; padding: 3px 0 3px 18px; font-size: 13px; flex-wrap: wrap; }
-  label.wp .nm { text-decoration: underline dotted; cursor: pointer; }
-  label.wp .meta, .wpgroup .meta { font-size: 11.5px; color: var(--muted); }
-  ul.flushes { list-style: none; margin: 6px 0 0; padding: 0; max-height: 220px; overflow-y: auto; }
-  ul.flushes li { display: flex; gap: 8px; align-items: center; padding: 4px; cursor: pointer; border-radius: 6px; }
-  ul.flushes li:hover { background: var(--chip); }
-  ul.flushes .score { font-weight: 700; width: 30px; text-align: center; border-radius: 4px; color: #1d1d1d; }
-  ul.flushes .meta { font-size: 12px; color: var(--muted); }
+  .wpgroup > summary { padding: 4px 0; margin: 0; font-size: 13px; justify-content: flex-start; gap: 8px; }
+  .wpgroup > summary::after { margin-left: auto; }
+  .wpgroup[open] > summary { margin-bottom: 0; }
+  .wpgroup .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,.2); }
+  label.wp { display: flex; gap: 8px; align-items: baseline; padding: 4px 0 4px 20px; font-size: 13px; flex-wrap: wrap; }
+  label.wp .nm { text-decoration: underline; text-decoration-color: var(--fill-2); text-underline-offset: 3px; cursor: pointer; }
 
-  /* Field-mode readout */
-  #here { position: absolute; z-index: 1000; top: 12px; left: 344px; max-width: 340px; background: var(--panel); color: var(--text);
-    border-radius: 10px; box-shadow: var(--shadow); padding: 10px 12px; cursor: pointer; }
-  #here[hidden] { display: none; }
-  #here .h-main { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; }
-  #here .h-score { display: inline-block; min-width: 32px; text-align: center; border-radius: 5px; padding: 2px 4px; color: #1d1d1d; font-weight: 800; }
-  #here .h-land { font-size: 13px; margin-top: 4px; }
-  #here .h-land.ok { color: var(--accent); }
-  #here .h-land.warn { color: #d9482b; font-weight: 600; }
-  #here .h-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
-  .leaflet-control.locate.on a { background: #1976d2; color: #fff; }
-  .leaflet-control.locate.paused a { color: #1976d2; box-shadow: inset 0 0 0 2px #1976d2; }
-  .leaflet-touch .leaflet-bar a { width: 40px; height: 40px; line-height: 40px; }
+  .warn { background: var(--warn-bg); color: var(--warn); padding: 7px 10px; margin: 6px 0 8px; font-size: 12.5px; border-radius: 9px;
+    display: flex; gap: 7px; align-items: flex-start; }
+  .warn svg.i { margin-top: 2px; }
 
-  .leaflet-popup-content { font-size: 13px; line-height: 1.45; min-width: 220px; }
-  .pop h3 { margin: 0 0 4px; font-size: 15px; }
-  .pop .big { font-size: 22px; font-weight: 800; }
+  /* ---- Field-mode readout ---- */
+  #here { position: absolute; z-index: 1000; top: 12px; left: 364px; max-width: 340px; border-radius: 14px; padding: 12px 14px; cursor: pointer; }
+  #here .h-main { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 9px; }
+  #here .h-land { font-size: 13px; margin-top: 6px; display: flex; gap: 6px; align-items: flex-start; }
+  #here .h-land svg.i { margin-top: 3px; }
+  #here .h-land.ok { color: var(--ok); }
+  #here .h-land.warn { color: var(--warn); background: none; padding: 0; font-weight: 600; }
+  #here .h-sub { font-size: 12px; color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+  /* ---- Map chrome ---- */
+  .leaflet-container { font: inherit; }
+  .leaflet-touch .leaflet-bar, .leaflet-bar { border: 0; border-radius: 12px; overflow: hidden; }
+  .leaflet-bar a, .leaflet-touch .leaflet-bar a { width: 40px; height: 40px; line-height: 40px; background: transparent; color: var(--text);
+    border-bottom: 1px solid var(--line); font-size: 19px; font-weight: 400; display: flex; align-items: center; justify-content: center; }
+  .leaflet-bar a:last-child { border-bottom: 0; }
+  .leaflet-bar a:hover, .leaflet-bar a:focus { background: var(--fill); color: var(--text); }
+  .leaflet-bar a.leaflet-disabled { background: transparent; color: var(--muted); opacity: .45; }
+  .leaflet-top.leaflet-right .leaflet-control { margin: 12px 12px 0 0; }
+  .leaflet-control.locate svg { width: 18px; height: 18px; }
+  .leaflet-control.locate.on a { background: var(--here); color: #fff; }
+  .leaflet-control.locate.paused a { color: var(--here); }
+  .leaflet-control-attribution { background: var(--panel) !important; color: var(--muted); font-size: 10.5px; padding: 1px 7px; border-radius: 7px 0 0 0; }
+  .leaflet-control-attribution a { color: inherit; }
+  .leaflet-control-scale-line { background: transparent; border: 1.5px solid var(--text); border-top: 0; color: var(--text); font-size: 10.5px;
+    text-shadow: 0 0 2px #fff, 0 0 2px #fff; opacity: .75; }
+
+  /* Statewide view: the basemap steps back, the columns carry the picture. */
+  .leaflet-tile-pane { transition: filter .45s ease; }
+  #map.hotspots .leaflet-tile-pane { filter: saturate(.38) contrast(.92) brightness(1.05); }
+  /* The tilted 3D map sits above Leaflet's panes and below its controls. */
+  .map3d { position: absolute; inset: 0; z-index: 500; opacity: 0; visibility: hidden; pointer-events: none;
+    transition: opacity .3s ease, visibility 0s .3s; font: inherit; }
+  .map3d.on { opacity: 1; visibility: visible; pointer-events: auto; transition: opacity .3s ease; }
+  #map.is3d .leaflet-control-scale { display: none; }
+  .hot-tip { position: absolute; z-index: 650; transform: translate(-50%, -100%); pointer-events: none; white-space: nowrap;
+    padding: 7px 10px; border-radius: 10px; font-size: 12.5px; line-height: 1.35; color: var(--text); }
+  .hot-tip b { font-variant-numeric: tabular-nums; }
+  .hot-tip span { display: block; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+  /* Popups */
+  .leaflet-popup-content-wrapper, .leaflet-popup-tip { background: var(--solid); color: var(--text); box-shadow: var(--shadow); }
+  .leaflet-popup-content-wrapper { border-radius: 14px; }
+  .leaflet-popup-content { font-size: 13px; line-height: 1.45; min-width: 220px; margin: 14px 16px; }
+  .leaflet-container a.leaflet-popup-close-button { color: var(--muted); top: 6px; right: 6px; }
+  .pop h3 { margin: 0 22px 6px 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+  .pop .big { margin: 8px 0 2px; }
+  .pop .big .score { font-size: 20px; min-width: 46px; padding: 3px 8px; border-radius: 8px; }
   .pop ul { padding-left: 16px; margin: 6px 0; }
-  .pop .small { font-size: 11.5px; color: #666; }
-  .pop .actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-  .pop .actions a, .pop .actions button { font-size: 12px; padding: 4px 8px; border: 1px solid #ccc;
-    border-radius: 5px; background: #f5f5f5; color: #222; text-decoration: none; cursor: pointer; }
-  .leaflet-control.locate a { font-size: 18px; line-height: 30px; text-align: center; font-weight: bold; }
+  .pop .small { font-size: 11.5px; color: var(--muted); }
+  .pop .small b { color: var(--text); font-weight: 600; }
+  .pop .actions { display: flex; gap: 6px; margin: 10px 0 6px; flex-wrap: wrap; }
+  .pop .actions a, .pop .actions button { font-size: 12.5px; font-weight: 500; padding: 6px 10px; border: 0; border-radius: 8px;
+    background: var(--fill); color: var(--text); text-decoration: none; cursor: pointer; }
+  .pop .actions a:hover, .pop .actions button:hover { background: var(--fill-2); }
+
+  #toggle, .grabber { display: none; }
 
   @media (max-width: 700px) {
-    #here { left: 10px; right: 64px; top: calc(env(safe-area-inset-top) + 10px); max-width: none; }
+    html, body { font-size: 15px; }
+    #here { left: 10px; right: 62px; top: calc(env(safe-area-inset-top) + 10px); max-width: none; }
     .leaflet-top { top: env(safe-area-inset-top); }
-    #panel .body { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
-    label.row { padding: 7px 0; }
-    .btn { padding: 9px 12px; }
-    #panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-height: 70vh;
-      border-radius: 14px 14px 0 0; transform: translateY(calc(100% - 64px - env(safe-area-inset-bottom))); transition: transform .25s; }
+    .leaflet-top.leaflet-right .leaflet-control { margin: 10px 10px 0 0; }
+    .leaflet-bar a, .leaflet-touch .leaflet-bar a { width: 44px; height: 44px; }
+    .leaflet-bottom { bottom: calc(72px + env(safe-area-inset-bottom)); }
+    #panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-height: 78vh; border-radius: 20px 20px 0 0;
+      transform: translateY(calc(100% - 76px - env(safe-area-inset-bottom))); transition: transform .32s cubic-bezier(.2, .8, .2, 1); }
     #panel.open { transform: none; }
-    #toggle { display: block; position: absolute; right: 12px; top: 12px; }
-    #panel header { position: relative; padding-right: 90px; cursor: pointer; }
+    #panel header { position: relative; padding: 20px 20px 14px; cursor: pointer; min-height: 76px; }
+    .grabber { display: block; position: absolute; top: 7px; left: 50%; width: 36px; height: 5px; margin-left: -18px;
+      border-radius: 3px; background: var(--fill-2); }
+    #panel .body { padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+    .seg button { padding: 9px 8px; font-size: 14px; }
+    .btn { padding: 11px 14px; font-size: 14px; }
+    .btn.icon { padding: 11px; }
+    label.row { padding: 10px 0; font-size: 14px; }
+    label.row input { width: 18px; height: 18px; }
+    #top li, ul.flushes li { padding: 10px 8px; }
+    details > summary { padding: 8px 0; }
+    select { padding: 11px 10px; font-size: 16px; }
+    .hint { font-size: 13px; }
+    h2 { font-size: 14px; }
   }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="here" hidden></div>
 
-<aside id="panel">
+<aside id="panel" aria-label="Map options">
   <header id="panelHeader">
+    <span class="grabber" aria-hidden="true"></span>
     <h1>Grouse Cover Finder</h1>
     <div id="status">Loading…</div>
-    <button id="toggle" class="btn" type="button">Options</button>
+    <button id="toggle" type="button" aria-label="Show or hide options"></button>
   </header>
   <div class="body">
     <section>
-      <h2>Season</h2>
-      <div class="seg" id="season">
-        <button data-v="early" class="on" type="button">Early (Sep–Oct)</button>
-        <button data-v="late" type="button">Late (Nov–Jan)</button>
+      <div class="seg" id="season" role="group" aria-label="Season">
+        <button data-v="early" class="on" type="button">Early · Sep–Oct</button>
+        <button data-v="late" type="button">Late · Nov–Jan</button>
       </div>
       <div class="hint" id="seasonHint">Leaves on: young dense aspen, alder edges, openings with berries &amp; clover.</div>
     </section>
 
     <section>
-      <h2>Habitat score</h2>
-      <div class="ramp"><span style="background:var(--s1)"></span><span style="background:var(--s2)"></span><span style="background:var(--s3)"></span><span style="background:var(--s4)"></span><span style="background:var(--s5)"></span></div>
-      <div class="ramp-labels"><span>fair</span><span>good</span><span>best</span></div>
-      <label style="display:block;margin-top:10px">Show stands scoring ≥ <b id="minVal">40</b>
-        <input id="minScore" type="range" min="0" max="90" step="5" value="40"></label>
-      <div class="hint">Zoomed out, colored squares show where good stands cluster statewide; tap one to zoom in. From zoom 13, individual stands load. Stand data covers State Forest &amp; State Game Areas; National Forest is scored from USFS harvest records.</div>
+      <h2>Statewide view</h2>
+      <div class="seg" id="hotMode" role="group" aria-label="Statewide view style">
+        <button data-v="3d" class="on" type="button">3D</button>
+        <button data-v="flat" type="button">Flat</button>
+      </div>
+      <div id="hotLegend" data-mode="3d">
+        <span class="k lg-h">Height</span>
+        <div class="lg-h">
+          <div class="bars" aria-hidden="true"><span style="height:12%"></span><span style="height:30%"></span><span style="height:52%"></span><span style="height:76%"></span><span style="height:100%"></span></div>
+          <div class="scale-labels"><span>little good cover</span><span>a lot</span></div>
+        </div>
+        <span class="k">Color</span>
+        <div>
+          <div class="ramp" aria-hidden="true"><span style="background:var(--s1)"></span><span style="background:var(--s2)"></span><span style="background:var(--s3)"></span><span style="background:var(--s4)"></span><span style="background:var(--s5)"></span></div>
+          <div class="scale-labels"><span>fair</span><span>good</span><span>best</span></div>
+        </div>
+      </div>
+      <label class="field" for="minScore"><span>Count stands scoring at least</span><b id="minVal">40</b></label>
+      <input id="minScore" type="range" min="0" max="90" step="5" value="40">
+      <div class="hint">Tap a hotspot, or keep zooming in, and the map drops to individual stands. In 3D, drag to look around. Stand data covers State Forest and State Game Areas; National Forest is scored from USFS harvest records.</div>
       <div class="hint" id="hotspotInfo"></div>
     </section>
 
     <section>
       <h2>Top spots in view</h2>
       <ul id="top"><li class="meta">Zoom in to see scored stands.</li></ul>
-      <div class="btns" style="margin-top:8px">
-        <button class="btn primary" id="exportGpx" type="button">Export for onX (GPX)</button>
+      <div class="btns" style="margin-top:12px">
+        <button class="btn primary" id="exportGpx" type="button">Export for onX</button>
         <button class="btn" id="exportKml" type="button">Shapes (KML)</button>
       </div>
-      <div class="hint">Imports into onX Web Map as waypoints / shapes (Import Markups). Max 4 MB.</div>
+      <div class="hint">GPX waypoints or KML shapes for onX Web Map (Import Markups). Max 4 MB.</div>
+    </section>
+
+    <section>
+      <details open>
+        <summary><h2>Layers</h2></summary>
+        <div id="layerList"></div>
+      </details>
+    </section>
+
+    <section>
+      <details>
+        <summary><h2>Basemap</h2></summary>
+        <select id="basemap" aria-label="Basemap">
+          <option value="topo">USGS Topo</option>
+          <option value="imagery">Satellite (Esri)</option>
+          <option value="otm">OpenTopoMap (shows two-tracks)</option>
+        </select>
+      </details>
+    </section>
+
+    <section>
+      <details>
+        <summary><h2>Offline</h2></summary>
+        <div class="btns">
+          <button class="btn primary" id="saveArea" type="button">Save this area</button>
+          <button class="btn" id="installBtn" type="button" hidden>Install app</button>
+        </div>
+        <div class="hint" id="offlineInfo">Zoom to the area you'll hunt, then save it. Stands, sales, land, trails and USGS topo tiles are stored on this device.</div>
+        <div class="hint" id="installHint" hidden>To install on iPhone: tap Share, then Add to Home Screen.</div>
+        <ul id="areas"></ul>
+        <button class="btn" id="clearOffline" type="button">Clear offline data</button>
+      </details>
+    </section>
+
+    <section>
+      <details>
+        <summary><h2>Your onX tracks &amp; waypoints</h2></summary>
+        <div class="btns">
+          <label class="btn">Import GPX/KML<input id="importFile" type="file" accept=".gpx,.kml" multiple hidden></label>
+          <button class="btn" id="checkFlushes" type="button">Pick &amp; score flushes</button>
+          <button class="btn" id="clearImports" type="button">Clear</button>
+        </div>
+        <div class="hint" id="importInfo">Export from onX (Markups → Export) and drop the file here or on the map.</div>
+        <div id="flushPicker" hidden></div>
+        <div id="flushReport"></div>
+      </details>
     </section>
 
     <section>
       <details>
         <summary><h2>Tune the model</h2></summary>
-        <div class="hint" id="weightsSummary">Using research defaults</div>
+        <div class="hint" id="weightsSummary" style="margin-top:0">Using research defaults</div>
         <div class="hint">Defaults come from Gullion, Kubisiak, Berner and Michigan DNR research. See the field reference for each one.</div>
         <div id="weights"></div>
       </details>
-    </section>
-
-    <section>
-      <h2>Offline</h2>
-      <div class="btns">
-        <button class="btn primary" id="saveArea" type="button">Save this area for offline</button>
-        <button class="btn" id="installBtn" type="button" hidden>Install app</button>
-      </div>
-      <div class="hint" id="offlineInfo">Zoom to the area you'll hunt, then save it. Stands, sales, land, trails and USGS topo tiles are stored on this device.</div>
-      <div class="hint" id="installHint" hidden>To install on iPhone: tap Share → Add to Home Screen.</div>
-      <ul id="areas"></ul>
-      <button class="btn" id="clearOffline" type="button">Clear offline data</button>
-    </section>
-
-    <section>
-      <h2>Layers</h2>
-      <div id="layerList"></div>
-    </section>
-
-    <section>
-      <h2>Your onX tracks &amp; waypoints</h2>
-      <div class="btns">
-        <label class="btn">Import GPX/KML<input id="importFile" type="file" accept=".gpx,.kml" multiple hidden></label>
-        <button class="btn" id="checkFlushes" type="button">Pick &amp; score flushes</button>
-        <button class="btn" id="clearImports" type="button">Clear</button>
-      </div>
-      <div class="hint" id="importInfo">Export from onX (Markups → Export) and drop the file here or on the map.</div>
-      <div id="flushPicker" hidden></div>
-      <div id="flushReport"></div>
-    </section>
-
-
-    <section>
-      <h2>Basemap</h2>
-      <select id="basemap">
-        <option value="topo">USGS Topo</option>
-        <option value="imagery">Satellite (Esri)</option>
-        <option value="otm">OpenTopoMap (shows two-tracks)</option>
-      </select>
     </section>
   </div>
 </aside>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script src="https://unpkg.com/@mapbox/togeojson@0.16.2/togeojson.js"></script>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <script src="habitat.js"></script>
 <script src="offline.js"></script>
 <script src="loss.js"></script>

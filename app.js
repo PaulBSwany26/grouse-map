@@ -28,6 +28,13 @@
   const RAMP = ['#fff1a8', '#ffc95c', '#f2913d', '#d9482b', '#8c1018'];
   function rampColor(s) { return s < 35 ? RAMP[0] : s < 50 ? RAMP[1] : s < 65 ? RAMP[2] : s < 80 ? RAMP[3] : RAMP[4]; }
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const svg = (d, cls = '') => `<svg class="i ${cls}" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+  const ICON = {
+    warn: svg('<path d="M8 2.2 14.3 13H1.7L8 2.2Z"/><path d="M8 6.6v3.2M8 11.6v.1"/>', 'warn-i'),
+    check: svg('<path d="m3 8.5 3.2 3.2L13 4.6"/>'),
+    close: svg('<path d="m4 4 8 8M12 4l-8 8"/>'),
+    locate: svg('<path d="M13.4 2.6 2.6 7.2l4.7 1.5 1.5 4.7 4.6-10.8Z"/>'),
+  };
   const store = {
     get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch { return false; } },
@@ -68,6 +75,7 @@
     basemapKey = basemapSel.value;
     BASEMAPS[basemapKey].addTo(map);
     store.set('grouse.basemap', basemapKey);
+    if (window.Hotspots) Hotspots.setBasemap();
   });
 
   // Satellite canopy loss by year (loss.js): red = cut in last 3 years, teal = 4–20 years ago.
@@ -108,7 +116,7 @@
   // ArcGIS REST query → GeoJSON (with paging)
   // ---------------------------------------------------------------------------
   // Keep popups / fitted views clear of the side panel on desktop.
-  const panelPad = () => L.point(window.innerWidth > 700 ? 350 : 20, 20);
+  const panelPad = () => L.point(window.innerWidth > 700 ? 370 : 20, 20);
   const degPerPx = (z) => 360 / (256 * Math.pow(2, z));
   async function queryGeoJSON(url, o, signal) {
     const out = [];
@@ -390,7 +398,7 @@
       <div class="small">${c} — paste into onX search to drop a pin.</div>`;
   }
   function scoreHtml(rec) {
-    return `<div class="big" style="color:${rec.score >= 50 ? rampColor(rec.score) : '#777'};text-shadow:0 0 1px #0004">${rec.score}</div>
+    return `<div class="big"><span class="score" style="background:${rampColor(rec.score)};${rec.score >= 80 ? 'color:#fff' : ''}">${rec.score}</span></div>
       <ul>${rec.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`;
   }
   function standPopup(f) {
@@ -399,7 +407,7 @@
     const sold = soldCuts.get(p.StandID) || [];
     const notes = (p.ManagementNotes || '').trim();
     return `<div class="pop"><h3>${esc(p.CoverType || 'Unknown')}${rec.age != null ? ` · ~${rec.age} yrs` : ''}</h3>
-      ${rec.cut ? `<div class="warn">⚠ ${esc(rec.cut.text)}</div>` : ''}
+      ${rec.cut ? `<div class="warn">${ICON.warn}<span>${esc(rec.cut.text)}</span></div>` : ''}
       ${scoreHtml(rec)}
       <div class="small">${esc(p.SizeDensityDescription || '')} · ${p.Acres ? p.Acres.toFixed(1) + ' ac' : ''} · inventoried ${esc(p.Date || '?')}
       · ${esc(p.CountyName || '')} Co. · stand ${esc(p.FCKey)}-${esc(p.StandNumber)}</div>
@@ -411,7 +419,7 @@
   function usfsPopup(f) {
     const rec = records.get(f._id); const p = f.properties;
     const d = p.date_completed ? new Date(p.date_completed).toLocaleDateString() : '?';
-    return `<div class="pop"><h3>USFS: ${esc(p.activity_name)}</h3>${rec.cut ? `<div class="warn">⚠ ${esc(rec.cut.text)}</div>` : ''}${scoreHtml(rec)}
+    return `<div class="pop"><h3>USFS: ${esc(p.activity_name)}</h3>${rec.cut ? `<div class="warn">${ICON.warn}<span>${esc(rec.cut.text)}</span></div>` : ''}${scoreHtml(rec)}
       <div class="small">Completed ${d} · ${p.gis_acres ? p.gis_acres.toFixed(1) + ' ac' : ''}<br>
       Sale: ${esc(p.sale_name || '—')} · ${esc(p.admin_forest_name || '')}, ${esc(p.admin_district_name || '')}</div>
       ${actionsHtml(rec.center)}</div>`;
@@ -679,7 +687,7 @@
       for (const r of hs) {
         const li = document.createElement('li');
         li.innerHTML = `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>
-          <span><div>${esc(r.cover)}${r.age != null ? ', ' + r.age + 'y' : ''}${r.sale ? ' ⚠' : ''}</div><div class="meta">${r.acres} ac · tap to zoom in</div></span>`;
+          <span><div>${esc(r.cover)}${r.age != null ? ', ' + r.age + 'y' : ''}${r.sale ? ' ' + ICON.warn : ''}</div><div class="meta">${r.acres} ac</div></span>`;
         li.addEventListener('click', () => { map.setView([r.lat, r.lng], 15); document.getElementById('panel').classList.remove('open'); });
         ul.appendChild(li);
       }
@@ -691,7 +699,7 @@
     for (const r of top) {
       const li = document.createElement('li');
       li.innerHTML = `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>
-        <span><div>${esc(label(r))}${r.cut ? ' ⚠' : ''}</div><div class="meta">${r.acres ? r.acres.toFixed(0) + ' ac' : ''}${r.cut ? ' · ' + (r.cut.kind === 'fresh' ? 'fresh cut' : 'active sale') : ''}</div></span>`;
+        <span><div>${esc(label(r))}${r.cut ? ' ' + ICON.warn : ''}</div><div class="meta">${r.acres ? r.acres.toFixed(0) + ' ac' : ''}${r.cut ? ' · ' + (r.cut.kind === 'fresh' ? 'fresh cut' : 'active sale') : ''}</div></span>`;
       li.addEventListener('click', () => {
         const l = r.feature._layer;
         map.fitBounds(l.getBounds(), { maxZoom: 16, paddingTopLeft: panelPad().add([20, 20]), paddingBottomRight: [40, 40] });
@@ -786,7 +794,7 @@
     options: { position: 'topright' },
     onAdd() {
       const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control locate');
-      div.innerHTML = '<a href="#" title="Track my location" role="button" aria-label="Track my location">◎</a>';
+      div.innerHTML = `<a href="#" title="Track my location" role="button" aria-label="Track my location">${ICON.locate}</a>`;
       L.DomEvent.disableClickPropagation(div);
       L.DomEvent.on(div, 'click', (e) => {
         L.DomEvent.preventDefault(e);
@@ -877,13 +885,13 @@
       for (const f of layer.features.values()) if (inGeom(pt, f.geometry)) { lands.push(fmt(f.properties)); break; }
     }
     const standLine = best
-      ? `<span class="h-score" style="background:${rampColor(best.score)};${best.score >= 80 ? 'color:#fff' : ''}">${best.score}</span> ${esc(label(best))}`
-      : `<span class="h-score" style="background:#ccc">–</span> No stand data here`;
+      ? `<span class="score" style="background:${rampColor(best.score)};${best.score >= 80 ? 'color:#fff' : ''}">${best.score}</span> ${esc(label(best))}`
+      : `<span class="score" style="background:#ccc">–</span> No stand data here`;
     const landLine = !landChecked ? '' : lands.length
-      ? `<div class="h-land ok">✓ ${esc(lands.join(' · '))}</div>`
-      : `<div class="h-land warn">⚠ Not on mapped public land — check boundaries</div>`;
+      ? `<div class="h-land ok">${ICON.check}<span>${esc(lands.join(' · '))}</span></div>`
+      : `<div class="h-land warn">${ICON.warn}<span>Not on mapped public land. Check boundaries.</span></div>`;
     hereEl.hidden = false;
-    const cutLine = best && best.cut ? `<div class="h-land warn">⚠ ${esc(best.cut.text)}</div>` : '';
+    const cutLine = best && best.cut ? `<div class="h-land warn">${ICON.warn}<span>${esc(best.cut.text)}</span></div>` : '';
     hereEl.innerHTML = `<div class="h-main">${standLine}</div>${cutLine}${landLine}<div class="h-sub">±${Math.round(e.accuracy)} m${
       navigator.onLine === false ? ' · offline' : ''}</div>`;
     if (best) hereEl.onclick = () => best.feature._layer.openPopup(best.center || e.latlng);
@@ -1142,7 +1150,7 @@ ${pms}
     for (const a of areas.sort((x, y) => y.id - x.id)) {
       const li = document.createElement('li');
       li.innerHTML = `<span><div>${esc(a.name)}</div><div class="meta">${new Date(a.id).toLocaleDateString()} · ${a.features.toLocaleString()} features · ${a.tiles.toLocaleString()} tiles (to z${a.zMax})</div></span>
-        <button class="btn" type="button" data-go>Go</button><button class="btn" type="button" data-del aria-label="Remove">✕</button>`;
+        <button class="btn" type="button" data-go>Go</button><button class="btn icon" type="button" data-del aria-label="Remove">${ICON.close}</button>`;
       li.querySelector('[data-go]').addEventListener('click', () => {
         map.fitBounds(L.latLngBounds(a.bounds)); panel.classList.remove('open');
       });
@@ -1209,8 +1217,23 @@ ${pms}
   if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) installHint.hidden = false;
 
   // Statewide hotspots (zoomed out)
-  function syncHotspots() { if (window.Hotspots) Hotspots.setVisible(L_.stands.visible && map.getZoom() < 13); }
-  Hotspots.init(map, () => state).then((ok) => {
+  function syncHotspots() {
+    if (!window.Hotspots) return;
+    const on = L_.stands.visible && map.getZoom() < 13;
+    Hotspots.setVisible(on);
+    // quiet the basemap while the statewide view is up so the hotspots carry the picture
+    map.getContainer().classList.toggle('hotspots', on && Hotspots.loaded);
+    document.getElementById('hotLegend').dataset.mode = Hotspots.mode;
+  }
+  const hotModeEl = document.getElementById('hotMode');
+  function setHotMode(v) {
+    store.set('grouse.hotMode', v);
+    hotModeEl.querySelectorAll('button').forEach((b) => { const on = b.dataset.v === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+    Hotspots.setMode(v); syncHotspots();
+  }
+  hotModeEl.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setHotMode(b.dataset.v); });
+  setHotMode(store.get('grouse.hotMode', '3d') === 'flat' ? 'flat' : '3d');
+  Hotspots.init(map, () => state, () => { const l = BASEMAPS[basemapKey]; return { url: l._url, maxzoom: l.options.maxNativeZoom || l.options.maxZoom }; }).then((ok) => {
     if (!ok) return;
     syncHotspots(); updateTop();
     const i = Hotspots.info();

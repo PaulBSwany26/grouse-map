@@ -5,7 +5,7 @@
  *  - Feature data (stands, sales, land…) is stored by the app itself in IndexedDB, not here.
  * Bump VERSION whenever app files change so phones pick up the update.
  */
-const VERSION = 'v6';
+const VERSION = 'v7';
 const SHELL = `grouse-shell-${VERSION}`;
 const TILES = 'grouse-tiles';
 
@@ -15,6 +15,8 @@ const SHELL_FILES = [
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css',
   'https://unpkg.com/@mapbox/togeojson@0.16.2/togeojson.js',
+  'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js',
+  'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css',
 ];
 
 const TILE_HOSTS = ['basemap.nationalmap.gov', 'server.arcgisonline.com', 'tile.opentopomap.org', 'tiles.globalforestwatch.org'];
