@@ -401,6 +401,36 @@
     return `<div class="big"><span class="score" style="background:${rampColor(rec.score)};${rec.score >= 80 ? 'color:#fff' : ''}">${rec.score}</span></div>
       <ul>${rec.reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>`;
   }
+  // Perimeter + widest span of a polygon, and how long walking its edge takes at a hunting pace.
+  const R_EARTH = 6371008.8;
+  function hav(a, b) {
+    const t = Math.PI / 180, dLat = (b[1] - a[1]) * t, dLng = (b[0] - a[0]) * t;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(a[1] * t) * Math.cos(b[1] * t) * Math.sin(dLng / 2) ** 2;
+    return 2 * R_EARTH * Math.asin(Math.sqrt(h));
+  }
+  const outerRings = (g) => (!g ? [] : g.type === 'Polygon' ? [g.coordinates[0]] : g.type === 'MultiPolygon' ? g.coordinates.map((p) => p[0]) : []);
+  function edgeStats(g) {
+    const rings = outerRings(g);
+    if (!rings.length) return null;
+    let per = 0;
+    for (const r of rings) for (let i = 1; i < r.length; i++) per += hav(r[i - 1], r[i]);
+    const all = rings.flat(), step = Math.max(1, Math.ceil(all.length / 150)), pts = all.filter((_, i) => i % step === 0);
+    let wide = 0;
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) wide = Math.max(wide, hav(pts[i], pts[j]));
+    return { per, wide };
+  }
+  function edgeHtml(g) {
+    const e = edgeStats(g);
+    if (!e) return '';
+    const mi = e.per / 1609.34;
+    const lo = (mi / 2) * 60, hi = (mi / 1.25) * 60; // minutes at 2 mph and 1.25 mph
+    const time = hi < 60 ? `${Math.max(5, Math.round(lo / 5) * 5)}–${Math.max(5, Math.round(hi / 5) * 5)} min`
+      : lo >= 60 ? `${(lo / 60).toFixed(1)}–${(hi / 60).toFixed(1)} hr` : `${Math.max(5, Math.round(lo / 5) * 5)} min–${(hi / 60).toFixed(1)} hr`;
+    const dist = mi < 0.25 ? Math.round(e.per * 1.0936).toLocaleString() + ' yd' : mi.toFixed(mi < 10 ? 2 : 1) + ' mi';
+    return `<div class="edge"><b>${dist}</b> around the edge · ${Math.round(e.wide * 1.0936).toLocaleString()} yd across at the widest
+      <div class="small">About ${time} to walk the edge at a hunting pace (1.25–2 mph). Edge outlined on the map.</div></div>`;
+  }
+
   function standPopup(f) {
     const rec = records.get(f._id); const p = f.properties;
     const up = upcoming.get(p.StandID) || [];
@@ -414,6 +444,7 @@
       ${sold.map((s) => `<div class="small"><b>Sold for harvest:</b> ${esc(s.sale)} (${s.year})</div>`).join('')}
       ${up.map((s) => `<div class="small"><b>Upcoming harvest:</b> ${esc(s.sale || 'unnamed')} — ${esc(s.status)}${s.year ? ' (' + s.year + ')' : ''}</div>`).join('')}
       ${notes ? `<div class="small" style="margin-top:4px"><b>Forester notes:</b> ${esc(notes.slice(0, 280))}${notes.length > 280 ? '…' : ''}</div>` : ''}
+      ${edgeHtml(f.geometry)}
       ${actionsHtml(rec.center)}</div>`;
   }
   function usfsPopup(f) {
@@ -422,6 +453,7 @@
     return `<div class="pop"><h3>USFS: ${esc(p.activity_name)}</h3>${rec.cut ? `<div class="warn">${ICON.warn}<span>${esc(rec.cut.text)}</span></div>` : ''}${scoreHtml(rec)}
       <div class="small">Completed ${d} · ${p.gis_acres ? p.gis_acres.toFixed(1) + ' ac' : ''}<br>
       Sale: ${esc(p.sale_name || '—')} · ${esc(p.admin_forest_name || '')}, ${esc(p.admin_district_name || '')}</div>
+      ${edgeHtml(f.geometry)}
       ${actionsHtml(rec.center)}</div>`;
   }
   function salePopup(f) {
@@ -437,7 +469,8 @@
       <div><b>${esc(st)}</b>${y ? ` · proposed start ${y}` : ''} · ${p.Acres ? p.Acres.toFixed(1) + ' ac' : ''}</div>
       <div class="small">${esc(p.TreatmentName || '')}${p.SaleNumber ? ' · sale #' + esc(p.SaleNumber) : ''}</div>
       ${outlook ? `<p style="margin:6px 0">${esc(outlook)}</p>` : ''}
-      ${rx ? `<div class="small"><b>Prescription:</b> ${esc(rx.slice(0, 400))}${rx.length > 400 ? '…' : ''}</div>` : ''}</div>`;
+      ${rx ? `<div class="small"><b>Prescription:</b> ${esc(rx.slice(0, 400))}${rx.length > 400 ? '…' : ''}</div>` : ''}
+      ${edgeHtml(f.geometry)}</div>`;
   }
   const simplePopup = (title, rows) => (f) => {
     const p = f.properties;
@@ -445,11 +478,22 @@
       .map(([k, fn]) => { const v = fn(p); return v ? `<div class="small"><b>${esc(k)}:</b> ${esc(v)}</div>` : ''; }).join('')}</div>`;
   };
 
+  let selected = null;
   map.on('popupopen', (e) => {
     e.popup.getElement().querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', () => {
       navigator.clipboard?.writeText(b.dataset.copy).then(() => { b.textContent = 'Copied'; }, () => { b.textContent = b.dataset.copy; });
     }));
+    // outline the selected area: white halo + dark dashes, readable on topo and satellite
+    if (selected) { map.removeLayer(selected); selected = null; }
+    const f = e.popup._source && e.popup._source.feature;
+    if (f && f.geometry && /Polygon/.test(f.geometry.type)) {
+      selected = L.layerGroup([
+        L.geoJSON(f.geometry, { pane: 'imports', interactive: false, style: { color: '#fff', weight: 6, opacity: 0.9, fill: false } }),
+        L.geoJSON(f.geometry, { pane: 'imports', interactive: false, style: { color: '#111', weight: 2.5, opacity: 1, dashArray: '8 6', fill: false } }),
+      ]).addTo(map);
+    }
   });
+  map.on('popupclose', () => { if (selected) { map.removeLayer(selected); selected = null; } });
 
   // ---------------------------------------------------------------------------
   // Layers
@@ -590,9 +634,113 @@
   // Imports (onX GPX/KML)
   const importGroup = L.geoJSON(null, {
     pane: 'imports',
-    style: () => ({ color: '#1565c0', weight: 3, opacity: 0.9, fillOpacity: 0.1 }),
-    pointToLayer: (f, ll) => L.circleMarker(ll, { pane: 'imports', radius: 6, color: '#fff', weight: 2, fillColor: '#1565c0', fillOpacity: 1 }),
+    // Recorded onX tracks/routes: thin purple dashes, so they read as "where I walked".
+    style: (f) => (f.geometry && f.geometry.type === 'Point'
+      ? { color: '#37474f', weight: 1.5, opacity: 1, fillColor: '#eceff1', fillOpacity: 0.9 }
+      : { color: '#7e57c2', weight: 2.5, opacity: 0.75, dashArray: '6 5', fillOpacity: 0.05 }),
+    // Ordinary pins: small gray dots. Picked flushes are drawn on top, larger, in orange/brown.
+    pointToLayer: (f, ll) => L.circleMarker(ll, { pane: 'imports', radius: 4, color: '#37474f', weight: 1.5, fillColor: '#eceff1', fillOpacity: 0.9 }),
     onEachFeature: (f, l) => { const n = f.properties && (f.properties.name || f.properties.desc); if (n) l.bindTooltip(esc(n)); },
+  });
+
+  // ---------------------------------------------------------------------------
+  // Tap anywhere for info.
+  // Leaflet gives each pane its own canvas and only the top one sees a tap, so stands
+  // under the trails/sales layers couldn't be clicked. Instead every vector layer ignores
+  // the pointer and this one handler checks what's under the tap, most useful first:
+  // your waypoints → a trail, road or recorded track tapped right on → the stand →
+  // a timber sale → public land.
+  // ---------------------------------------------------------------------------
+  (function () {
+    const css = document.createElement('style');
+    css.textContent = ['land', 'habitat', 'sales', 'lines', 'imports'].map((p) => `.leaflet-${p}-pane canvas, .leaflet-${p}-pane svg`).join(', ') +
+      ' { pointer-events: none !important; }';
+    document.head.appendChild(css);
+  })();
+  function fBounds(f) {
+    if (!f._bb) {
+      let w = Infinity, s = Infinity, e = -Infinity, n = -Infinity;
+      (function walk(c) { if (typeof c[0] === 'number') { w = Math.min(w, c[0]); e = Math.max(e, c[0]); s = Math.min(s, c[1]); n = Math.max(n, c[1]); } else c.forEach(walk); })(f.geometry ? f.geometry.coordinates : []);
+      f._bb = [w, s, e, n];
+    }
+    return f._bb;
+  }
+  const inBox = (f, lng, lat, tol) => { const b = fBounds(f); return lng >= b[0] - tol && lng <= b[2] + tol && lat >= b[1] - tol && lat <= b[3] + tol; };
+  function pxToLine(pt, g) {
+    const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' || g.type === 'Polygon' ? g.coordinates : [];
+    let best = Infinity;
+    for (const ln of lines) {
+      let prev = null;
+      for (const c of ln) { const p = map.latLngToContainerPoint([c[1], c[0]]); if (prev) best = Math.min(best, L.LineUtil.pointToSegmentDistance(pt, prev, p)); prev = p; }
+    }
+    return best;
+  }
+  function lineLengthMi(g) {
+    const lines = g.type === 'LineString' ? [g.coordinates] : g.type === 'MultiLineString' ? g.coordinates : [];
+    let m = 0; for (const ln of lines) for (let i = 1; i < ln.length; i++) m += hav(ln[i - 1], ln[i]);
+    return m / 1609.34;
+  }
+  function waypointPopup(w) {
+    const d = w.date ? w.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '';
+    return `<div class="pop"><h3>${esc(w.name)}</h3><div class="small">${esc(w.icon)}${d ? ' · ' + d : ''}</div>
+      ${w.notes ? `<div class="small" style="margin-top:4px">${esc(w.notes)}</div>` : ''}
+      <label class="row" style="margin-top:6px"><input type="checkbox" data-flushkey="${esc(w.key)}" ${isPicked(w) ? 'checked' : ''}>
+        Count as a ${species(w)} flush</label>
+      ${actionsHtml(L.latLng(w.lat, w.lng))}</div>`;
+  }
+  map.on('popupopen', (e) => {
+    const cb = e.popup.getElement().querySelector('[data-flushkey]');
+    if (cb) cb.addEventListener('change', () => {
+      picks[cb.dataset.flushkey] = cb.checked; store.set('grouse.flushPicks', picks);
+      drawFlushMarks(); if (pickerEl.dataset.open === '1') renderPicker();
+    });
+  });
+  const LINE_LAYERS = ['usfsClosed', 'dnrTrails', 'usfsTrails', 'dnrRoads'];
+  const LAND_LAYERS = ['gems', 'hap', 'cfr', 'parks', 'wildlife', 'stateForest', 'fedLand'];
+  map.on('click', (e) => {
+    if (map.getZoom() < 13 && L_.stands.visible && window.Hotspots && Hotspots.loaded) return; // statewide view handles taps
+    const ll = e.latlng, pt = e.containerPoint, lng = ll.lng, lat = ll.lat;
+    const tol = (px) => px * (360 / (256 * Math.pow(2, map.getZoom())));
+    // 1. your waypoints (within ~15 px)
+    if (map.hasLayer(importGroup) && waypoints.length) {
+      let best = null, bd = 15;
+      for (const w of waypoints) { const d = map.latLngToContainerPoint([w.lat, w.lng]).distanceTo(pt); if (d < bd) { bd = d; best = w; } }
+      if (best) { L.popup({ maxWidth: 320 }).setLatLng([best.lat, best.lng]).setContent(waypointPopup(best)).openOn(map); return; }
+    }
+    // 2. a trail or road tapped right on (within ~5 px)
+    let bestLine = null, bl = 5;
+    for (const k of LINE_LAYERS) {
+      const layer = L_[k]; if (!layer || !layer.visible) continue;
+      for (const f of layer.features.values()) { if (!inBox(f, lng, lat, tol(5))) continue; const d = pxToLine(pt, f.geometry); if (d < bl) { bl = d; bestLine = f; } }
+    }
+    if (bestLine && bestLine._layer) { bestLine._layer.openPopup(ll); return; }
+    // 3. one of your recorded tracks tapped right on (within ~7 px)
+    if (map.hasLayer(importGroup)) {
+      let bestT = null, bt = 7;
+      importGroup.eachLayer((l) => { const g = l.feature && l.feature.geometry; if (g && /LineString/.test(g.type)) { const d = pxToLine(pt, g); if (d < bt) { bt = d; bestT = l; } } });
+      if (bestT) {
+        const p = bestT.feature.properties || {};
+        L.popup({ maxWidth: 300 }).setLatLng(ll).setContent(`<div class="pop"><h3>${esc(p.name || 'Track')}</h3><div class="small">Recorded track · ${lineLengthMi(bestT.feature.geometry).toFixed(2)} mi</div>${p.desc ? `<div class="small">${esc(String(p.desc).replace(/name=|notes=|id=\S+/g, '').trim().slice(0, 120))}</div>` : ''}</div>`).openOn(map);
+        return;
+      }
+    }
+    // 4. the stand (DNR) or USFS cut under the tap
+    const [px, py] = proj([lng, lat]);
+    let stand = null;
+    for (const r of records.values()) {
+      if ((r.kind === 'stand' && !L_.stands.visible) || (r.kind === 'usfs' && !L_.usfs.visible)) continue;
+      const b = r.bbox; if (px < b[0] || px > b[2] || py < b[1] || py > b[3]) continue;
+      if (!inGeom([lng, lat], r.feature.geometry)) continue;
+      if (!stand || (stand.kind === 'usfs' && r.kind === 'stand')) stand = r;
+    }
+    if (stand && stand.feature._layer) { stand.feature._layer.openPopup(ll); return; }
+    // 5. timber sale, 6. public land
+    for (const k of ['treatments', ...LAND_LAYERS]) {
+      const layer = L_[k]; if (!layer || !layer.visible) continue;
+      for (const f of layer.features.values()) {
+        if (inBox(f, lng, lat, 0) && inGeom([lng, lat], f.geometry) && f._layer) { f._layer.openPopup(ll); return; }
+      }
+    }
   });
 
   // UI rows: key → { label, swatch, members[] }
@@ -993,7 +1141,7 @@
   function drawFlushMarks() {
     flushMarks.clearLayers();
     for (const w of waypoints.filter(isPicked)) {
-      L.circleMarker([w.lat, w.lng], { pane: 'imports', radius: 7, color: '#fff', weight: 2, fillColor: species(w) === 'woodcock' ? '#6d4c41' : '#ff6f00', fillOpacity: 1 })
+      L.circleMarker([w.lat, w.lng], { pane: 'imports', radius: 8, color: '#fff', weight: 2.5, fillColor: species(w) === 'woodcock' ? '#6d4c41' : '#ff6f00', fillOpacity: 1 })
         .bindTooltip((species(w) === 'woodcock' ? 'Woodcock: ' : 'Grouse: ') + esc(w.name)).addTo(flushMarks);
     }
   }

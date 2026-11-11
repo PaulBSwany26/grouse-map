@@ -217,6 +217,13 @@
   .leaflet-popup-content-wrapper { border-radius: 14px; }
   .leaflet-popup-content { font-size: 13px; line-height: 1.45; min-width: 220px; margin: 14px 16px; }
   .leaflet-container a.leaflet-popup-close-button { color: var(--muted); top: 6px; right: 6px; }
+  .pop .edge { margin: 8px 0 4px; padding: 7px 10px; border-radius: 9px; background: rgba(127,127,127,.13); font-size: 12.5px; line-height: 1.45; }
+  .imp-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+  .lg { display: inline-block; vertical-align: middle; }
+  .lg-track { width: 18px; height: 0; border-top: 2.5px dashed #7e57c2; }
+  .lg-pin { width: 8px; height: 8px; border-radius: 50%; background: #eceff1; border: 1.5px solid #37474f; }
+  .lg-grouse, .lg-wood { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #0003; background: #ff6f00; }
+  .lg-wood { background: #6d4c41; }
   .pop h3 { margin: 0 22px 6px 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
   .pop .big { margin: 8px 0 2px; }
   .pop .big .score { font-size: 20px; min-width: 46px; padding: 3px 8px; border-radius: 8px; }
@@ -353,6 +360,7 @@
           <button class="btn" id="clearImports" type="button">Clear</button>
         </div>
         <div class="hint" id="importInfo">Export from onX (Markups → Export) and drop the file here or on the map.</div>
+        <div class="hint imp-legend"><span class="lg lg-track"></span> your tracks <span class="lg lg-pin"></span> other pins <span class="lg lg-grouse"></span> grouse flush <span class="lg lg-wood"></span> woodcock</div>
         <div id="flushPicker" hidden></div>
         <div id="flushReport"></div>
       </details>
