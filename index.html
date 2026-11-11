@@ -82,6 +82,20 @@
   #areas li > span { flex: 1; }
   #areas .meta { font-size: 12px; color: var(--muted); }
   .btn:disabled { opacity: .5; }
+  .pop .warn, .warn { background: #fff3e0; color: #8a3b00; border-left: 3px solid #ff6f00; padding: 5px 8px; margin: 4px 0 6px; font-size: 12.5px; border-radius: 3px; }
+  .wgroup { font-size: 12px; font-weight: 600; color: var(--muted); margin: 10px 0 2px; }
+  .wrow { display: block; font-size: 13px; padding: 3px 0; }
+  .wrow i { color: var(--muted); font-style: normal; font-size: 11.5px; }
+  details > summary { cursor: pointer; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary h2 { display: inline; }
+  details > summary::after { content: ' ▸'; color: var(--muted); }
+  details[open] > summary::after { content: ' ▾'; }
+  ul.flushes { list-style: none; margin: 6px 0 0; padding: 0; max-height: 220px; overflow-y: auto; }
+  ul.flushes li { display: flex; gap: 8px; align-items: center; padding: 4px; cursor: pointer; border-radius: 6px; }
+  ul.flushes li:hover { background: var(--chip); }
+  ul.flushes .score { font-weight: 700; width: 30px; text-align: center; border-radius: 4px; color: #1d1d1d; }
+  ul.flushes .meta { font-size: 12px; color: var(--muted); }
 
   /* Field-mode readout */
   #here { position: absolute; z-index: 1000; top: 12px; left: 344px; max-width: 340px; background: var(--panel); color: var(--text);
@@ -147,7 +161,8 @@
       <div class="ramp-labels"><span>fair</span><span>good</span><span>best</span></div>
       <label style="display:block;margin-top:10px">Show stands scoring ≥ <b id="minVal">40</b>
         <input id="minScore" type="range" min="0" max="90" step="5" value="40"></label>
-      <div class="hint">Stand data covers State Forest &amp; State Game Areas. National Forest is scored from USFS harvest records. Zoom to 13+ to load stands.</div>
+      <div class="hint">Zoomed out, colored squares show where good stands cluster statewide; tap one to zoom in. From zoom 13, individual stands load. Stand data covers State Forest &amp; State Game Areas; National Forest is scored from USFS harvest records.</div>
+      <div class="hint" id="hotspotInfo"></div>
     </section>
 
     <section>
@@ -158,6 +173,15 @@
         <button class="btn" id="exportKml" type="button">Shapes (KML)</button>
       </div>
       <div class="hint">Imports into onX Web Map as waypoints / shapes (Import Markups). Max 4 MB.</div>
+    </section>
+
+    <section>
+      <details>
+        <summary><h2>Tune the model</h2></summary>
+        <div class="hint" id="weightsSummary">Using research defaults</div>
+        <div class="hint">Defaults come from Gullion, Kubisiak, Berner and Michigan DNR research. See the field reference for each one.</div>
+        <div id="weights"></div>
+      </details>
     </section>
 
     <section>
@@ -181,9 +205,11 @@
       <h2>Your onX tracks &amp; waypoints</h2>
       <div class="btns">
         <label class="btn">Import GPX/KML<input id="importFile" type="file" accept=".gpx,.kml" multiple hidden></label>
+        <button class="btn" id="checkFlushes" type="button">Check my flushes</button>
         <button class="btn" id="clearImports" type="button">Clear</button>
       </div>
       <div class="hint" id="importInfo">Export from onX (Markups → Export) and drop the file here or on the map.</div>
+      <div id="flushReport"></div>
     </section>
 
 
@@ -202,6 +228,8 @@
 <script src="https://unpkg.com/@mapbox/togeojson@0.16.2/togeojson.js"></script>
 <script src="habitat.js"></script>
 <script src="offline.js"></script>
+<script src="loss.js"></script>
+<script src="hotspots.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

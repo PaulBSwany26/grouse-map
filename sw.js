@@ -5,12 +5,12 @@
  *  - Feature data (stands, sales, land…) is stored by the app itself in IndexedDB, not here.
  * Bump VERSION whenever app files change so phones pick up the update.
  */
-const VERSION = 'v2';
+const VERSION = 'v4';
 const SHELL = `grouse-shell-${VERSION}`;
 const TILES = 'grouse-tiles';
 
 const SHELL_FILES = [
-  './', './index.html', './app.js', './habitat.js', './offline.js', './manifest.webmanifest',
+  './', './index.html', './app.js', './habitat.js', './offline.js', './loss.js', './hotspots.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js',
   'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css',
@@ -64,7 +64,7 @@ async function tileFirst(req) {
 async function shellFirst(req, url) {
   const cache = await caches.open(SHELL);
   const key = url.origin === self.location.origin && url.pathname.endsWith('/') ? new URL('./', self.location).href : req.url;
-  const net = fetch(req).then((res) => { if (res.ok) cache.put(key, res.clone()); return res; }).catch(() => null);
+  const net = fetch(req, { cache: 'no-cache' }).then((res) => { if (res.ok) cache.put(key, res.clone()); return res; }).catch(() => null);
   const timeout = new Promise((r) => setTimeout(() => r(null), 3000));
   const first = await Promise.race([net, timeout]);
   if (first) return first;

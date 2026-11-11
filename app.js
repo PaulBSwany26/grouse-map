@@ -70,12 +70,39 @@
     store.set('grouse.basemap', basemapKey);
   });
 
-  // Satellite canopy loss (UMD/Hansen via Global Forest Watch). The year window
-  // targets cuts that are now roughly 4–20 years old — prime grouse regrowth.
-  const LOSS_START = NOW - 20, LOSS_END = Math.min(NOW - 4, 2024);
-  const lossLayer = L.tileLayer(
-    `https://tiles.globalforestwatch.org/umd_tree_cover_loss/latest/dynamic/{z}/{x}/{y}.png?start_year=${LOSS_START}&end_year=${LOSS_END}&tree_cover_density_threshold=30`,
-    { pane: 'loss', maxNativeZoom: 12, maxZoom: 19, opacity: 0.85, attribution: 'Hansen/UMD/Google/USGS/NASA via Global Forest Watch' });
+  // Satellite canopy loss by year (loss.js): red = cut in last 3 years, teal = 4–20 years ago.
+  const LOSS_TILE_URL = 'https://tiles.globalforestwatch.org/umd_tree_cover_loss/latest/dynamic/{z}/{x}/{y}.png?tree_cover_density_threshold=30';
+  const lossLayer = LossRaster.layer({ pane: 'loss', minZoom: 10 });
+
+  // Recent Sentinel-2 imagery (10 m, every few days) via Microsoft Planetary Computer — shows
+  // cuts made this year, before the annual loss data catches up.
+  function s2Window() {
+    const d = new Date(), m = d.getMonth();
+    const iso = (x) => x.toISOString().slice(0, 10);
+    if (m >= 4 && m <= 10) return [iso(new Date(d - 150 * 864e5)), iso(d)]; // leaf-on/fall: last ~5 months
+    const y = m <= 3 ? d.getFullYear() - 1 : d.getFullYear(); // winter: last summer/fall (no snow)
+    return [`${y}-07-01`, `${y}-10-31`];
+  }
+  const S2_WIN = s2Window();
+  const s2Layer = L.tileLayer('', { pane: 'loss', minZoom: 11, maxNativeZoom: 15, maxZoom: 19,
+    attribution: 'Contains modified Copernicus Sentinel-2 data via Microsoft Planetary Computer' });
+  async function s2Url() {
+    const key = 'grouse.s2.' + S2_WIN.join('_');
+    const cached = store.get(key, null);
+    let id = cached && Date.now() - cached.t < 3 * 864e5 ? cached.id : null;
+    if (!id) {
+      const body = { collections: ['sentinel-2-l2a'], 'filter-lang': 'cql2-json', sortby: [{ field: 'eo:cloud_cover', direction: 'asc' }],
+        filter: { op: 'and', args: [
+          { op: 'anyinteracts', args: [{ property: 'datetime' }, { interval: [S2_WIN[0] + 'T00:00:00Z', S2_WIN[1] + 'T23:59:59Z'] }] },
+          { op: '<=', args: [{ property: 'eo:cloud_cover' }, 15] },
+          { op: 's_intersects', args: [{ property: 'geometry' }, { type: 'Polygon', coordinates: [[[-90.5, 41.6], [-82.1, 41.6], [-82.1, 47.6], [-90.5, 47.6], [-90.5, 41.6]]] }] }] } };
+      const r = await fetch('https://planetarycomputer.microsoft.com/api/data/v1/mosaic/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      id = (await r.json()).searchid;
+      store.set(key, { id, t: Date.now() });
+    }
+    return `https://planetarycomputer.microsoft.com/api/data/v1/mosaic/${id}/tiles/WebMercatorQuad/{z}/{x}/{y}@1x?collection=sentinel-2-l2a&assets=visual&asset_bidx=visual%7C1%2C2%2C3&nodata=0&format=png`;
+  }
+  s2Layer.on('add', () => { if (!s2Layer._url) s2Url().then((u) => s2Layer.setUrl(u)).catch((e) => console.warn('Sentinel-2 unavailable', e)); });
 
   // ---------------------------------------------------------------------------
   // ArcGIS REST query → GeoJSON (with paging)
@@ -287,34 +314,63 @@
 
   function invYear(dateStr) { const m = /(\d{4})$/.exec(dateStr || ''); return m ? +m[1] : null; }
 
+  // Age + cut status, best evidence first:
+  //  1. Satellite canopy loss (Hansen/GFW, annual to LossRaster.lastYear) covering ≥25% of the stand
+  //     and newer than the inventory → age = years since that loss.
+  //  2. A SOLD DNR sale newer than the inventory but no satellite loss yet → "may be logged now" warning.
   function effectiveAge(rec) {
-    rec.ageNote = null;
+    rec.ageNote = null; rec.cut = null;
     rec.age = rec.baseAge;
-    const sold = soldCuts.get(rec.standId);
-    if (!sold) return;
-    const latest = sold.reduce((a, b) => (b.year > a.year ? b : a));
     const iy = invYear(rec.props.Date);
-    const since = NOW - latest.year;
-    // Inventory predates the sale and still shows an old stand → assume it was cut.
-    if (latest.year >= (iy || 0) && (rec.baseAge == null || rec.baseAge > since + 2)) {
-      rec.age = Math.max(0, since - 1);
-      rec.ageNote = `Age estimated from SOLD sale "${latest.sale}" (${latest.year}); inventory is from ${iy || '?'}`;
+    const loss = rec.loss;
+    if (loss && loss.frac >= 0.25 && loss.year >= (iy || 0) - 1) {
+      const lossAge = NOW - loss.year;
+      if (rec.baseAge == null || rec.baseAge > lossAge + 2) {
+        rec.age = lossAge;
+        rec.ageNote = `Satellite: canopy loss in ${loss.year} over ${Math.round(loss.frac * 100)}% of stand (inventory ${iy || '?'} said ${rec.baseAge ?? '?'} yrs)`;
+      }
+    }
+    if (rec.age != null && rec.age <= 2) {
+      rec.cut = { kind: 'fresh', text: `Fresh cut (${loss && loss.frac >= 0.25 ? 'satellite ' + loss.year : 'inventory age ' + rec.age}) — food, not cover, until about year 4–6` };
+      return;
+    }
+    const sold = soldCuts.get(rec.standId);
+    if (sold) {
+      const latest = sold.reduce((a, b) => (b.year > a.year ? b : a));
+      const ageIsOld = rec.age == null || rec.age > NOW - latest.year + 2;
+      if (latest.year >= (iy || 0) && ageIsOld && NOW - latest.year <= 5) {
+        const sat = window.LossRaster ? ` Satellite shows no cut through ${LossRaster.lastYear}.` : '';
+        rec.cut = { kind: 'active', text: `Sold timber sale "${latest.sale}" (${latest.year}) — may be logged now or soon.${sat}` };
+      }
     }
   }
 
   function scoreRecord(rec) {
     if (rec.kind === 'usfs') {
-      Object.assign(rec, H.usfsScore(rec, state.season));
+      rec.cut = rec.age != null && rec.age <= 2 ? { kind: 'fresh', text: 'Fresh USFS cut — food, not cover, until about year 4–6' } : null;
+      Object.assign(rec, H.score(rec, 0, state.season));
       return;
     }
     effectiveAge(rec);
     const nbs = [...rec.neighbors].filter((n) => n.kind === 'stand');
-    Object.assign(rec, H.scoreWithNeighbors(rec, nbs, state.season));
+    rec.flags = H.flagsFromNeighbors(nbs);
+    Object.assign(rec, H.score(rec, rec.flags, state.season));
+  }
+  function rescoreAll() {
+    records.forEach(scoreRecord);
+    L_.stands.restyle(); L_.usfs.restyle(); updateTop();
+    if (window.Hotspots) Hotspots.redraw();
   }
 
   function habitatStyle(f, dashed) {
     const rec = records.get(f._id);
     const s = rec ? rec.score : 0;
+    if (rec && rec.cut) {
+      const fresh = rec.cut.kind === 'fresh';
+      const show = s >= state.minScore;
+      return { stroke: true, color: fresh ? '#c62828' : '#ff6f00', weight: 2.5, opacity: 0.95, dashArray: fresh ? '6 4' : '2 5',
+        fill: true, fillColor: show ? rampColor(s) : '#c62828', fillOpacity: show ? 0.45 : fresh ? 0.12 : 0 };
+    }
     if (s < state.minScore) {
       return { stroke: map.getZoom() >= 14, color: '#7a7a7a', weight: 0.6, opacity: 0.35, fill: true, fillOpacity: 0 };
     }
@@ -343,6 +399,7 @@
     const sold = soldCuts.get(p.StandID) || [];
     const notes = (p.ManagementNotes || '').trim();
     return `<div class="pop"><h3>${esc(p.CoverType || 'Unknown')}${rec.age != null ? ` · ~${rec.age} yrs` : ''}</h3>
+      ${rec.cut ? `<div class="warn">⚠ ${esc(rec.cut.text)}</div>` : ''}
       ${scoreHtml(rec)}
       <div class="small">${esc(p.SizeDensityDescription || '')} · ${p.Acres ? p.Acres.toFixed(1) + ' ac' : ''} · inventoried ${esc(p.Date || '?')}
       · ${esc(p.CountyName || '')} Co. · stand ${esc(p.FCKey)}-${esc(p.StandNumber)}</div>
@@ -354,7 +411,7 @@
   function usfsPopup(f) {
     const rec = records.get(f._id); const p = f.properties;
     const d = p.date_completed ? new Date(p.date_completed).toLocaleDateString() : '?';
-    return `<div class="pop"><h3>USFS: ${esc(p.activity_name)}</h3>${scoreHtml(rec)}
+    return `<div class="pop"><h3>USFS: ${esc(p.activity_name)}</h3>${rec.cut ? `<div class="warn">⚠ ${esc(rec.cut.text)}</div>` : ''}${scoreHtml(rec)}
       <div class="small">Completed ${d} · ${p.gis_acres ? p.gis_acres.toFixed(1) + ' ac' : ''}<br>
       Sale: ${esc(p.sale_name || '—')} · ${esc(p.admin_forest_name || '')}, ${esc(p.admin_district_name || '')}</div>
       ${actionsHtml(rec.center)}</div>`;
@@ -389,7 +446,7 @@
   // ---------------------------------------------------------------------------
   // Layers
   // ---------------------------------------------------------------------------
-  const STAND_FIELDS = 'OBJECTID,StandID,FCKey,StandNumber,CoverType,DominantAge,FirstOriginYear,SizeDensityDescription,OverallSize,Acres,Date,CountyName,ManagementNotes';
+  const STAND_FIELDS = 'OBJECTID,StandID,FCKey,StandNumber,CoverType,DominantAge,FirstOriginYear,SizeDensityDescription,OverallSize,Acres,Date,CountyName,ManagementNotes,UplandLowland';
   const outline = (color, o = {}) => () => ({ color, weight: o.weight || 1.5, opacity: 0.9, fill: true, fillColor: color,
     fillOpacity: o.fill ?? 0.06, dashArray: o.dash || null });
   const line = (color, weight, dash) => () => ({ color, weight, opacity: 0.9, dashArray: dash || null });
@@ -400,11 +457,11 @@
     style: (f) => habitatStyle(f, false), popup: standPopup,
     prepare: (f) => {
       const p = f.properties;
-      const rec = Object.assign(geomPrep(f.geometry), {
-        id: f._id, kind: 'stand', props: p, standId: p.StandID, cover: p.CoverType, group: H.groupOf(p.CoverType),
-        baseAge: H.estimateAge(p), sizeDensity: p.SizeDensityDescription, acres: p.Acres,
+      const rec = Object.assign(geomPrep(f.geometry), H.standFromDNR(p), {
+        id: f._id, kind: 'stand', props: p, standId: p.StandID, age: null, flags: 0, cut: null, loss: null,
         neighbors: new Set(), center: centroidOf(f.geometry), feature: f, score: 0, reasons: [],
       });
+      rec.age = rec.baseAge;
       records.set(f._id, rec);
       if (p.StandID != null) standsById.set(p.StandID, rec);
     },
@@ -412,6 +469,8 @@
       const dirty = linkNeighbors(fresh.map((f) => records.get(f._id)));
       dirty.forEach(scoreRecord);
       L_.stands.restyle();
+      if (window.LossRaster) LossRaster.analyze(fresh.map((f) => records.get(f._id)), () => {
+        fresh.forEach((f) => scoreRecord(records.get(f._id))); L_.stands.restyle(); updateTop(); });
     },
   });
   L_.usfs = new DataLayer({
@@ -419,8 +478,9 @@
     orderBy: 'objectid', outFields: 'objectid,activity_name,date_completed,gis_acres,sale_name,admin_forest_name,admin_district_name',
     style: (f) => habitatStyle(f, true), popup: usfsPopup,
     prepare: (f) => {
-      const rec = Object.assign(H.usfsHarvestToStand(f.properties), geomPrep(f.geometry),
-        { id: f._id, kind: 'usfs', props: f.properties, neighbors: new Set(), center: centroidOf(f.geometry), feature: f, acres: f.properties.gis_acres });
+      const rec = Object.assign(H.standFromUSFS(f.properties), geomPrep(f.geometry),
+        { id: f._id, kind: 'usfs', props: f.properties, flags: 0, cut: null, neighbors: new Set(), center: centroidOf(f.geometry), feature: f });
+      rec.age = rec.baseAge;
       scoreRecord(rec);
       records.set(f._id, rec);
     },
@@ -533,7 +593,8 @@
     { key: 'usfs', label: 'USFS harvests, scored (dashed)', swatch: [RAMP[2], '#5a1a00'], members: [L_.usfs], on: true },
     { key: 'gems', label: 'GEMS grouse areas', swatch: ['transparent', '#c62828'], members: [L_.gems], on: true },
     { key: 'sales', label: 'DNR timber sales (purple sold, blue upcoming)', swatch: ['transparent', '#6a3d9a'], members: [L_.treatments], on: true },
-    { key: 'loss', label: `Satellite canopy loss ${LOSS_START}–${LOSS_END} (all owners)`, swatch: ['#e9578a', '#e9578a'], tile: lossLayer, on: false },
+    { key: 'loss', label: 'Cuts by year from satellite (red = last 3 yrs, teal = 4–20 yrs)', swatch: ['#0097a7', '#c62828'], tile: lossLayer, on: false },
+    { key: 's2', label: `Recent satellite photo (${S2_WIN[0].slice(5)} to ${S2_WIN[1].slice(5)}, ${S2_WIN[1].slice(0, 4)})`, swatch: ['#6d7b5a', '#6d7b5a'], tile: s2Layer, on: false },
     { key: 'stateForest', label: 'State Forest', swatch: ['transparent', '#2e7d32'], members: [L_.stateForest], on: true },
     { key: 'wildlife', label: 'State game / wildlife areas', swatch: ['transparent', '#00897b'], members: [L_.wildlife], on: true },
     { key: 'parks', label: 'State parks (huntable)', swatch: ['transparent', '#9e9d24'], members: [L_.parks], on: false },
@@ -611,13 +672,26 @@
   }
   function updateTop() {
     const ul = document.getElementById('top');
+    const zoomedOut = map.getZoom() < 13;
+    if (zoomedOut && window.Hotspots && Hotspots.loaded && L_.stands.visible) {
+      const hs = Hotspots.top(map.getBounds(), 12, Math.max(state.minScore, 1));
+      ul.innerHTML = hs.length ? '' : '<li class="meta">Nothing above the threshold in view.</li>';
+      for (const r of hs) {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>
+          <span><div>${esc(r.cover)}${r.age != null ? ', ' + r.age + 'y' : ''}${r.sale ? ' ⚠' : ''}</div><div class="meta">${r.acres} ac · tap to zoom in</div></span>`;
+        li.addEventListener('click', () => { map.setView([r.lat, r.lng], 15); document.getElementById('panel').classList.remove('open'); });
+        ul.appendChild(li);
+      }
+      return;
+    }
     const top = map.getZoom() >= 12 ? topSpots(12) : [];
-    if (!top.length) { ul.innerHTML = `<li class="meta">${map.getZoom() < 13 ? 'Zoom in to see scored stands.' : 'Nothing above the threshold here.'}</li>`; return; }
+    if (!top.length) { ul.innerHTML = `<li class="meta">${zoomedOut ? 'Zoom in to see scored stands.' : 'Nothing above the threshold here.'}</li>`; return; }
     ul.innerHTML = '';
     for (const r of top) {
       const li = document.createElement('li');
       li.innerHTML = `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>
-        <span><div>${esc(label(r))}</div><div class="meta">${r.acres ? r.acres.toFixed(0) + ' ac' : ''}${r.neighbors.size ? ' · ' + r.neighbors.size + ' neighbors' : ''}</div></span>`;
+        <span><div>${esc(label(r))}${r.cut ? ' ⚠' : ''}</div><div class="meta">${r.acres ? r.acres.toFixed(0) + ' ac' : ''}${r.cut ? ' · ' + (r.cut.kind === 'fresh' ? 'fresh cut' : 'active sale') : ''}</div></span>`;
       li.addEventListener('click', () => {
         const l = r.feature._layer;
         map.fitBounds(l.getBounds(), { maxZoom: 16, paddingTopLeft: panelPad().add([20, 20]), paddingBottomRight: [40, 40] });
@@ -632,8 +706,8 @@
   // Controls: season, threshold
   // ---------------------------------------------------------------------------
   const SEASON_HINT = {
-    early: 'Leaves on: young dense aspen, alder edges, openings with berries & clover.',
-    late: 'Leaves down: conifer cover and mature aspen (bud feeding) gain weight.',
+    early: 'Leaves on: young aspen next to alder; birds roam during the fall shuffle. Fresh cuts are food, not cover.',
+    late: 'Leaves down: birds stay close to mature male aspen (bud food); young conifer helps when snow is thin.',
   };
   const seasonEl = document.getElementById('season');
   function setSeason(v) {
@@ -642,6 +716,7 @@
     document.getElementById('seasonHint').textContent = SEASON_HINT[v];
     records.forEach(scoreRecord);
     L_.stands.restyle(); L_.usfs.restyle();
+    if (window.Hotspots) Hotspots.redraw();
     refreshAll();
   }
   seasonEl.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setSeason(b.dataset.v); });
@@ -652,8 +727,45 @@
   minEl.addEventListener('input', () => {
     state.minScore = +minEl.value; minVal.textContent = minEl.value; store.set('grouse.min', state.minScore);
     L_.stands.restyle(); L_.usfs.restyle(); updateTop();
+    if (window.Hotspots) { clearTimeout(minEl._t); minEl._t = setTimeout(() => Hotspots.redraw(), 200); }
   });
   map.on('zoomend', () => { L_.stands.restyle(); L_.usfs.restyle(); });
+
+  // ---------------------------------------------------------------------------
+  // Tune the model: sliders over habitat.js weights (defaults = research values)
+  // ---------------------------------------------------------------------------
+  const weightsEl = document.getElementById('weights');
+  let overrides = store.get('grouse.weights', {});
+  H.setWeights(overrides);
+  function renderWeights() {
+    const W = H.weights();
+    let html = '', group = '';
+    for (const s of H.SLIDERS) {
+      if (s.group !== group) { group = s.group; html += `<div class="wgroup">${esc(group)}</div>`; }
+      const v = W[s.key], d = H.DEFAULTS[s.key];
+      const fmt = (x) => (s.signed && x > 0 ? '+' : '') + x + (s.unit ? ' ' + s.unit : '');
+      html += `<label class="wrow"><span>${esc(s.label)} <b>${fmt(v)}</b>${v !== d ? ` <i>(research: ${fmt(d)})</i>` : ''}</span>
+        <input type="range" min="${s.min}" max="${s.max}" step="${s.step}" value="${v}" data-key="${s.key}"></label>`;
+    }
+    const changed = Object.keys(overrides).length;
+    weightsEl.innerHTML = html + `<div class="btns" style="margin-top:8px"><button class="btn" type="button" id="resetWeights" ${changed ? '' : 'disabled'}>Reset to research defaults</button></div>`;
+    document.getElementById('weightsSummary').textContent = changed ? `${changed} weight(s) changed from research defaults` : 'Using research defaults';
+  }
+  let wTimer = null;
+  weightsEl.addEventListener('input', (e) => {
+    const k = e.target.dataset && e.target.dataset.key; if (!k) return;
+    const v = +e.target.value;
+    if (v === H.DEFAULTS[k]) delete overrides[k]; else overrides[k] = v;
+    H.setWeights(overrides); store.set('grouse.weights', overrides);
+    const b = e.target.closest('.wrow').querySelector('b'); const s = H.SLIDERS.find((x) => x.key === k);
+    b.textContent = (s.signed && v > 0 ? '+' : '') + v + (s.unit ? ' ' + s.unit : '');
+    clearTimeout(wTimer); wTimer = setTimeout(() => { rescoreAll(); renderWeights(); }, 250);
+  });
+  weightsEl.addEventListener('click', (e) => {
+    if (e.target.id !== 'resetWeights') return;
+    overrides = {}; store.set('grouse.weights', overrides); H.setWeights(overrides); rescoreAll(); renderWeights();
+  });
+  renderWeights();
 
   // Mobile bottom sheet
   const panel = document.getElementById('panel');
@@ -771,7 +883,8 @@
       ? `<div class="h-land ok">✓ ${esc(lands.join(' · '))}</div>`
       : `<div class="h-land warn">⚠ Not on mapped public land — check boundaries</div>`;
     hereEl.hidden = false;
-    hereEl.innerHTML = `<div class="h-main">${standLine}</div>${landLine}<div class="h-sub">±${Math.round(e.accuracy)} m${
+    const cutLine = best && best.cut ? `<div class="h-land warn">⚠ ${esc(best.cut.text)}</div>` : '';
+    hereEl.innerHTML = `<div class="h-main">${standLine}</div>${cutLine}${landLine}<div class="h-sub">±${Math.round(e.accuracy)} m${
       navigator.onLine === false ? ' · offline' : ''}</div>`;
     if (best) hereEl.onclick = () => best.feature._layer.openPopup(best.center || e.latlng);
   }
@@ -795,6 +908,45 @@
       'Export from onX (Markups → Export) and drop the file here or on the map.';
     if (fit && importGroup.getLayers().length) map.fitBounds(importGroup.getBounds(), { maxZoom: 15, padding: [30, 30] });
   }
+  // Check imported waypoints (e.g. onX flush/sighting pins) against the model.
+  const flushEl = document.getElementById('flushReport');
+  async function checkFlushes() {
+    const pts = [];
+    importGroup.eachLayer((l) => { if (l.feature && l.feature.geometry && l.feature.geometry.type === 'Point') pts.push(l); });
+    if (!pts.length) { flushEl.innerHTML = '<div class="hint">No waypoints in your imports.</div>'; return; }
+    flushEl.innerHTML = `<div class="hint">Checking ${pts.length} waypoint(s)…</div>`;
+    const results = [];
+    for (const l of pts.slice(0, 200)) {
+      const ll = l.getLatLng();
+      const name = (l.feature.properties && (l.feature.properties.name || l.feature.properties.desc)) || 'Waypoint';
+      try {
+        const p = new URLSearchParams({ geometry: `${ll.lng},${ll.lat}`, geometryType: 'esriGeometryPoint', inSR: '4326', distance: '120',
+          units: 'esriSRUnit_Meter', spatialRel: 'esriSpatialRelIntersects', outFields: STAND_FIELDS, returnGeometry: 'true', outSR: '4326', f: 'geojson' });
+        const fc = await (await fetch(SVC.stands + '/query?' + p)).json();
+        const recs = (fc.features || []).map((f) => Object.assign(H.standFromDNR(f.properties), { props: f.properties, feature: f }));
+        const here = recs.find((r) => inGeom([ll.lng, ll.lat], r.feature.geometry));
+        if (!here) { results.push({ name, ll, none: true }); continue; }
+        here.age = here.baseAge;
+        await new Promise((res) => LossRaster.analyze([here], res));
+        if (here.loss && here.loss.frac >= 0.25 && (here.baseAge == null || here.baseAge > NOW - here.loss.year + 2)) here.age = NOW - here.loss.year;
+        const flags = H.flagsFromNeighbors(recs.filter((r) => r !== here).map((r) => Object.assign(r, { age: r.baseAge })));
+        const sc = H.score(here, flags, state.season);
+        results.push({ name, ll, score: sc.score, cover: here.cover, age: here.age });
+      } catch (err) { results.push({ name, ll, none: true, err: true }); }
+    }
+    const scored = results.filter((r) => !r.none).map((r) => r.score).sort((a, b) => a - b);
+    const med = scored.length ? scored[Math.floor(scored.length / 2)] : null;
+    const hi = scored.filter((v) => v >= 60).length;
+    flushEl.innerHTML = `<div class="hint">${scored.length} of ${results.length} waypoints are on DNR stands` +
+      (scored.length ? ` · median score <b>${med}</b> · ${Math.round((hi / scored.length) * 100)}% score 60+` : '') +
+      `. Waypoints off state land (private, CFR, National Forest) have no stand data.</div><ul class="flushes">` +
+      results.map((r, i) => `<li data-i="${i}">${r.none ? '<span class="score" style="background:#ccc">–</span>'
+        : `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>`}
+        <span>${esc(r.name)}<div class="meta">${r.none ? (r.err ? 'lookup failed' : 'no DNR stand data') : esc(r.cover) + (r.age != null ? ', ' + r.age + 'y' : '')}</div></span></li>`).join('') + '</ul>';
+    flushEl.querySelectorAll('li').forEach((li) => li.addEventListener('click', () => map.setView(results[+li.dataset.i].ll, 16)));
+  }
+  document.getElementById('checkFlushes').addEventListener('click', checkFlushes);
+
   async function addFiles(files) {
     for (const file of files) {
       const kind = /\.kml$/i.test(file.name) ? 'kml' : /\.gpx$/i.test(file.name) ? 'gpx' : null;
@@ -897,7 +1049,7 @@ ${pms}
       const zMin = Math.max(8, Math.min(map.getZoom() - 2, 12));
       do { topo = OfflineTiles.tileUrls(USGS_TILE, bounds, zMin, zMax); } while (topo.length > MAX_TILES && --zMax > zMin);
       // 3) Canopy-loss tiles (native to z12)
-      const loss = OfflineTiles.tileUrls(lossLayer._url, bounds, Math.min(zMin, 12), 12);
+      const loss = OfflineTiles.tileUrls(LOSS_TILE_URL, bounds, 12, 12);
       const urls = topo.concat(loss);
       const res = await OfflineTiles.prefetch(urls, (d, t) => { offlineInfo.textContent = `Saving map tiles ${d.toLocaleString()} / ${t.toLocaleString()}…`; });
       const c = bounds.getCenter();
@@ -934,6 +1086,17 @@ ${pms}
   window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); deferredPrompt = e; installBtn.hidden = false; });
   installBtn.addEventListener('click', async () => { if (!deferredPrompt) return; deferredPrompt.prompt(); await deferredPrompt.userChoice; deferredPrompt = null; installBtn.hidden = true; });
   if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) installHint.hidden = false;
+
+  // Statewide hotspots (zoomed out)
+  function syncHotspots() { if (window.Hotspots) Hotspots.setVisible(L_.stands.visible && map.getZoom() < 13); }
+  Hotspots.init(map, () => state).then((ok) => {
+    if (!ok) return;
+    syncHotspots(); updateTop();
+    const i = Hotspots.info();
+    document.getElementById('hotspotInfo').textContent = `Statewide view: ${i.count.toLocaleString()} stands, updated ${i.generated.slice(0, 10)}.`;
+  });
+  map.on('zoomend', syncHotspots);
+  listEl.addEventListener('change', syncHotspots);
 
   refreshOfflineInfo();
   refreshAll();
