@@ -91,7 +91,7 @@ SSL_CERT_FILE=$(.venv/bin/python -m certifi) .venv/bin/python tools/build_summar
 
 onX has **no public API**. Pulling its parcel or trail layers through private endpoints would break its terms of service, so this app doesn't do that. Instead:
 
-- **onX → here:** export your markups from onX and drag the file onto this map. The Web Map can do it all at once: My Content → Select → Select All → Export → GPX. The phone app exports GPX only. Then tap **Check my flushes** to score every waypoint against the model.
+- **onX → here:** export your markups from onX and drag the file onto this map. The Web Map can do it all at once: My Content → Select → Select All → Export → GPX. The phone app exports GPX only. Then tap **Pick & score flushes**: waypoints are grouped by onX icon and color, and you tick the ones that are grouse or woodcock flushes or sightings. Upland-icon pins and names with flush, grouse, bird or woodcock start ticked; woodcock are kept as their own category. Picks are saved on the device. Scoring shows each flush's stand and score, and compares the median with every stand within about a mile. Your GPX files stay local, and the repository ignores .gpx and .kml.
 - **Here → onX:** "Export for onX" writes the top spots in view as GPX waypoints or KML shapes. Import them in the onX Web Map (4 MB / 3,000 markup limit). They then sync to your phone for the field.
 - **Property lines without onX:** for public land, the layers above are the authoritative boundaries. Private parcels come from each county's GIS or equalization office (often free). Statewide parcels are only available commercially, from vendors such as Regrid.
 

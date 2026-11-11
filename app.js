@@ -907,45 +907,166 @@
     importInfo.textContent = imports.length ? `${imports.length} file(s), ${count} features: ${imports.map((i) => i.name).join(', ')}` :
       'Export from onX (Markups → Export) and drop the file here or on the map.';
     if (fit && importGroup.getLayers().length) map.fitBounds(importGroup.getBounds(), { maxZoom: 15, padding: [30, 30] });
+    if (typeof renderPicker === 'function' && document.getElementById('flushPicker').dataset.open === '1') renderPicker();
+    if (typeof drawFlushMarks === 'function') { waypoints = parseWaypoints(); drawFlushMarks(); }
   }
-  // Check imported waypoints (e.g. onX flush/sighting pins) against the model.
+  // ---------------------------------------------------------------------------
+  // Flush picker: choose which imported waypoints are grouse flushes/sightings,
+  // then score them against the model. Picks are saved per waypoint on this device.
+  // ---------------------------------------------------------------------------
   const flushEl = document.getElementById('flushReport');
-  async function checkFlushes() {
-    const pts = [];
-    importGroup.eachLayer((l) => { if (l.feature && l.feature.geometry && l.feature.geometry.type === 'Point') pts.push(l); });
-    if (!pts.length) { flushEl.innerHTML = '<div class="hint">No waypoints in your imports.</div>'; return; }
-    flushEl.innerHTML = `<div class="hint">Checking ${pts.length} waypoint(s)…</div>`;
-    const results = [];
-    for (const l of pts.slice(0, 200)) {
-      const ll = l.getLatLng();
-      const name = (l.feature.properties && (l.feature.properties.name || l.feature.properties.desc)) || 'Waypoint';
-      try {
-        const p = new URLSearchParams({ geometry: `${ll.lng},${ll.lat}`, geometryType: 'esriGeometryPoint', inSR: '4326', distance: '120',
-          units: 'esriSRUnit_Meter', spatialRel: 'esriSpatialRelIntersects', outFields: STAND_FIELDS, returnGeometry: 'true', outSR: '4326', f: 'geojson' });
-        const fc = await (await fetch(SVC.stands + '/query?' + p)).json();
-        const recs = (fc.features || []).map((f) => Object.assign(H.standFromDNR(f.properties), { props: f.properties, feature: f }));
-        const here = recs.find((r) => inGeom([ll.lng, ll.lat], r.feature.geometry));
-        if (!here) { results.push({ name, ll, none: true }); continue; }
-        here.age = here.baseAge;
-        await new Promise((res) => LossRaster.analyze([here], res));
-        if (here.loss && here.loss.frac >= 0.25 && (here.baseAge == null || here.baseAge > NOW - here.loss.year + 2)) here.age = NOW - here.loss.year;
-        const flags = H.flagsFromNeighbors(recs.filter((r) => r !== here).map((r) => Object.assign(r, { age: r.baseAge })));
-        const sc = H.score(here, flags, state.season);
-        results.push({ name, ll, score: sc.score, cover: here.cover, age: here.age });
-      } catch (err) { results.push({ name, ll, none: true, err: true }); }
+  const pickerEl = document.getElementById('flushPicker');
+  let picks = store.get('grouse.flushPicks', {}); // key → true/false (absent = use suggestion)
+  let waypoints = [];
+  const flushMarks = L.layerGroup().addTo(map);
+  const FLUSH_RE = /flush|\bbirds?\b|grouse|ruff|partridge|woodcock|timberdoodle|\bdoodles?\b|\bpoint(ed)?\b/i;
+  const NOT_UPLAND_RE = /duck|redhead|teal|mallard|goose|turkey|deer|buck|doe|pheasant/i;
+  const WOODCOCK_RE = /woodcock|timberdoodle|\bdoodles?\b/i;
+  const species = (w) => (WOODCOCK_RE.test(w.name + ' ' + w.notes) ? 'woodcock' : 'grouse');
+
+  function parseWaypoints() {
+    const out = [];
+    for (const im of imports) {
+      const dom = new DOMParser().parseFromString(im.text, 'text/xml');
+      if (im.kind === 'gpx') {
+        dom.querySelectorAll('wpt').forEach((w) => {
+          const t = (sel) => { const e = w.getElementsByTagNameNS('*', sel)[0] || w.getElementsByTagName(sel)[0]; return e ? e.textContent.trim() : ''; };
+          const desc = t('desc');
+          const id = (/id=([0-9a-f-]{8,})/i.exec(desc) || [])[1];
+          const name = t('name') || 'Waypoint';
+          const notes = ((/notes=([\s\S]*?)\s+id=/.exec(desc) || [])[1] || '').trim();
+          out.push({ key: id || `${w.getAttribute('lat')},${w.getAttribute('lon')},${name}`, name, notes,
+            lat: +w.getAttribute('lat'), lng: +w.getAttribute('lon'), icon: t('icon') || t('sym') || 'Pin', color: t('color') || '', date: wpDate(name, t('time')) });
+        });
+      } else {
+        dom.querySelectorAll('Placemark').forEach((pm) => {
+          const c = pm.querySelector('Point coordinates'); if (!c) return;
+          const [lng, lat] = c.textContent.trim().split(',').map(Number);
+          const name = (pm.querySelector('name') || {}).textContent || 'Placemark';
+          out.push({ key: `${lat},${lng},${name}`, name, notes: '', lat, lng, icon: 'Placemark', color: '', date: wpDate(name, '') });
+        });
+      }
     }
-    const scored = results.filter((r) => !r.none).map((r) => r.score).sort((a, b) => a - b);
-    const med = scored.length ? scored[Math.floor(scored.length / 2)] : null;
-    const hi = scored.filter((v) => v >= 60).length;
-    flushEl.innerHTML = `<div class="hint">${scored.length} of ${results.length} waypoints are on DNR stands` +
-      (scored.length ? ` · median score <b>${med}</b> · ${Math.round((hi / scored.length) * 100)}% score 60+` : '') +
-      `. Waypoints off state land (private, CFR, National Forest) have no stand data.</div><ul class="flushes">` +
+    return out;
+  }
+  function wpDate(name, time) {
+    const m = /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/.exec(name);
+    if (m) return new Date((m[3].length === 2 ? 2000 + +m[3] : +m[3]), +m[1] - 1, +m[2]);
+    return time ? new Date(time) : null;
+  }
+  const inMichigan = (w) => w.lat > 41.6 && w.lat < 48.4 && w.lng > -90.5 && w.lng < -82.1 && !(w.lat > 46.5 && w.lng < -89.6 && w.lng > -92.5 && w.lat > 47.1);
+  const inSeason = (w) => !w.date || [8, 9, 10, 11, 0].includes(w.date.getMonth()); // Sep–Jan
+  const suggested = (w) => !NOT_UPLAND_RE.test(w.name + ' ' + w.notes) && (/upland/i.test(w.icon) || FLUSH_RE.test(w.name) || FLUSH_RE.test(w.notes));
+  const isPicked = (w) => (w.key in picks ? picks[w.key] : suggested(w));
+
+  function renderPicker() {
+    waypoints = parseWaypoints();
+    if (!waypoints.length) { pickerEl.innerHTML = ''; flushEl.innerHTML = ''; flushMarks.clearLayers(); return; }
+    const hideOff = pickerEl.dataset.hideOff !== '0';
+    const shown = waypoints.filter((w) => !hideOff || inSeason(w));
+    const groups = new Map();
+    for (const w of shown) { const g = w.icon + '|' + w.color; if (!groups.has(g)) groups.set(g, []); groups.get(g).push(w); }
+    const pickedList = waypoints.filter(isPicked), nPicked = pickedList.length;
+    const nWood = pickedList.filter((w) => species(w) === 'woodcock').length;
+    const fmt = (d) => (d ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : '');
+    pickerEl.innerHTML = `<div class="hint">Tick the waypoints that are grouse or woodcock flushes or sightings. Upland-icon pins and names with “flush”, “bird”, “grouse” or “woodcock” start ticked; names with “woodcock” are counted as woodcock, everything else as grouse. Tap a name to see it on the map. Picks are saved on this device.</div>
+      <div class="btns" style="margin:6px 0"><button class="btn" type="button" data-act="suggest">Reset to suggestions</button><button class="btn" type="button" data-act="none">Untick all</button>
+      <label class="row" style="padding:0"><input type="checkbox" data-act="hideoff" ${hideOff ? 'checked' : ''}> Hide Feb–Aug pins</label></div>
+      ${[...groups.entries()].sort((a, b) => b[1].length - a[1].length).map(([g, ws]) => {
+        const [icon, color] = g.split('|'); const k = ws.filter(isPicked).length;
+        return `<details class="wpgroup" ${k ? 'open' : ''}><summary><input type="checkbox" data-group="${esc(g)}" ${k === ws.length ? 'checked' : ''}>
+          <span class="dot" style="background:${esc(color || '#999')}"></span> ${esc(icon)} <span class="meta">(${k}/${ws.length} ticked)</span></summary>
+          ${ws.map((w) => `<label class="wp"><input type="checkbox" data-k="${esc(w.key)}" ${isPicked(w) ? 'checked' : ''}>
+            <span class="nm" data-go="${esc(w.key)}">${esc(w.name)}</span><span class="meta">${species(w) === 'woodcock' ? '<b>woodcock</b> · ' : ''}${fmt(w.date)}${inMichigan(w) ? '' : ' · outside MI'}${w.notes ? ' · ' + esc(w.notes.slice(0, 40)) : ''}</span></label>`).join('')}
+        </details>`; }).join('')}
+      <div class="btns" style="margin-top:8px"><button class="btn primary" type="button" data-act="score">Score ${nPicked} ticked flush${nPicked === 1 ? '' : 'es'}${nWood ? ` (${nPicked - nWood} grouse, ${nWood} woodcock)` : ''}</button></div>`;
+    drawFlushMarks();
+  }
+  function drawFlushMarks() {
+    flushMarks.clearLayers();
+    for (const w of waypoints.filter(isPicked)) {
+      L.circleMarker([w.lat, w.lng], { pane: 'imports', radius: 7, color: '#fff', weight: 2, fillColor: species(w) === 'woodcock' ? '#6d4c41' : '#ff6f00', fillOpacity: 1 })
+        .bindTooltip((species(w) === 'woodcock' ? 'Woodcock: ' : 'Grouse: ') + esc(w.name)).addTo(flushMarks);
+    }
+  }
+  pickerEl.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.dataset.k) { picks[t.dataset.k] = t.checked; }
+    else if (t.dataset.group) {
+      const [icon, color] = t.dataset.group.split('|');
+      waypoints.filter((w) => w.icon === icon && w.color === color).forEach((w) => (picks[w.key] = t.checked));
+    } else if (t.dataset.act === 'hideoff') { pickerEl.dataset.hideOff = t.checked ? '1' : '0'; }
+    store.set('grouse.flushPicks', picks);
+    const open = [...pickerEl.querySelectorAll('details')].map((d) => d.open);
+    renderPicker();
+    pickerEl.querySelectorAll('details').forEach((d, i) => { if (open[i] !== undefined) d.open = open[i]; });
+  });
+  pickerEl.addEventListener('click', (e) => {
+    const go = e.target.dataset && e.target.dataset.go;
+    if (go) { e.preventDefault(); const w = waypoints.find((x) => x.key === go); if (w) { map.setView([w.lat, w.lng], 16); panel.classList.remove('open'); } return; }
+    const act = e.target.dataset && e.target.dataset.act;
+    if (act === 'suggest') { picks = {}; store.set('grouse.flushPicks', picks); renderPicker(); }
+    if (act === 'none') { waypoints.forEach((w) => (picks[w.key] = false)); store.set('grouse.flushPicks', picks); renderPicker(); }
+    if (act === 'score') checkFlushes(waypoints.filter(isPicked));
+  });
+
+  async function scorePoint(ll) {
+    const p = new URLSearchParams({ geometry: `${ll.lng},${ll.lat}`, geometryType: 'esriGeometryPoint', inSR: '4326', distance: '120',
+      units: 'esriSRUnit_Meter', spatialRel: 'esriSpatialRelIntersects', outFields: STAND_FIELDS, returnGeometry: 'true', outSR: '4326', f: 'geojson' });
+    const fc = await (await fetch(SVC.stands + '/query?' + p)).json();
+    const recs = (fc.features || []).map((f) => Object.assign(H.standFromDNR(f.properties), { props: f.properties, feature: f }));
+    const here = recs.find((r) => inGeom([ll.lng, ll.lat], r.feature.geometry));
+    if (!here) return null;
+    here.age = here.baseAge;
+    await new Promise((res) => LossRaster.analyze([here], res));
+    if (here.loss && here.loss.frac >= 0.25 && (here.baseAge == null || here.baseAge > NOW - here.loss.year + 2)) here.age = NOW - here.loss.year;
+    const flags = H.flagsFromNeighbors(recs.filter((r) => r !== here).map((r) => Object.assign(r, { age: r.baseAge })));
+    return Object.assign({ cover: here.cover, age: here.age }, H.score(here, flags, state.season));
+  }
+
+  async function checkFlushes(list) {
+    if (!list.length) { flushEl.innerHTML = '<div class="hint">Tick at least one waypoint first.</div>'; return; }
+    flushEl.innerHTML = `<div class="hint">Scoring ${list.length} flush(es)…</div>`;
+    const results = [];
+    for (const w of list.slice(0, 300)) {
+      const ll = L.latLng(w.lat, w.lng);
+      if (!inMichigan(w)) { results.push({ w, ll, none: true, why: 'outside Michigan' }); continue; }
+      try {
+        const sc = await scorePoint(ll);
+        results.push(sc ? { w, ll, score: sc.score, cover: sc.cover, age: sc.age } : { w, ll, none: true, why: 'no DNR stand data (private, CFR or National Forest)' });
+      } catch (err) { results.push({ w, ll, none: true, why: 'lookup failed' }); }
+    }
+    const scored = results.filter((r) => !r.none);
+    const med = (a) => { const v = a.slice().sort((x, y) => x - y); return v.length ? v[Math.floor(v.length / 2)] : null; };
+    const fMed = med(scored.map((r) => r.score));
+    // Baseline: every DNR stand within ~2 km of these flushes (statewide summary)
+    let base = null;
+    if (scored.length && window.Hotspots && Hotspots.loaded) {
+      const near = [];
+      for (const r of scored) near.push(...Hotspots.top(r.ll.toBounds(4000), 1e9, 0));
+      const uniq = [...new Set(near)];
+      base = { med: med(uniq.map((x) => x.score)), n: uniq.length };
+    }
+    const byCover = {};
+    scored.forEach((r) => { byCover[r.cover] = (byCover[r.cover] || 0) + 1; });
+    const sp = (k) => scored.filter((r) => species(r.w) === k);
+    const spLine = ['grouse', 'woodcock'].map((k) => { const a = sp(k); return a.length ? `${k} ${med(a.map((r) => r.score))} (${a.length})` : ''; }).filter(Boolean).join(' · ');
+    flushEl.innerHTML = `<div class="hint"><b>${scored.length}</b> of ${list.length} flushes are on DNR stands.` +
+      (scored.length ? ` Median score at your flushes: <b>${fMed}</b>` + (base ? ` vs. <b>${base.med}</b> for all ${base.n} stands within ~1.2 mi.` : '.') : '') +
+      (sp('woodcock').length ? `<br>By species (median, count): ${spLine}. The model is built for grouse; woodcock favor wetter, younger alder and aspen.` : '') +
+      (scored.length ? `<br>Cover at flushes: ${Object.entries(byCover).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${esc(c)} ${n}`).join(' · ')}` : '') +
+      `</div><ul class="flushes">` +
       results.map((r, i) => `<li data-i="${i}">${r.none ? '<span class="score" style="background:#ccc">–</span>'
         : `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>`}
-        <span>${esc(r.name)}<div class="meta">${r.none ? (r.err ? 'lookup failed' : 'no DNR stand data') : esc(r.cover) + (r.age != null ? ', ' + r.age + 'y' : '')}</div></span></li>`).join('') + '</ul>';
+        <span>${esc(r.w.name)}${species(r.w) === 'woodcock' ? ' <b>(woodcock)</b>' : ''}<div class="meta">${r.none ? esc(r.why) : esc(r.cover) + (r.age != null ? ', ' + r.age + 'y' : '')}</div></span></li>`).join('') + '</ul>';
     flushEl.querySelectorAll('li').forEach((li) => li.addEventListener('click', () => map.setView(results[+li.dataset.i].ll, 16)));
   }
-  document.getElementById('checkFlushes').addEventListener('click', checkFlushes);
+  document.getElementById('checkFlushes').addEventListener('click', () => {
+    const open = pickerEl.dataset.open === '1';
+    pickerEl.dataset.open = open ? '0' : '1';
+    pickerEl.hidden = open;
+    if (!open) renderPicker();
+  });
 
   async function addFiles(files) {
     for (const file of files) {
@@ -1088,7 +1209,22 @@ ${pms}
   if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) installHint.hidden = false;
 
   // Statewide hotspots (zoomed out)
-  function syncHotspots() { if (window.Hotspots) Hotspots.setVisible(L_.stands.visible && map.getZoom() < 13); }
+  function syncHotspots() {
+    if (!window.Hotspots) return;
+    const on = L_.stands.visible && map.getZoom() < 13;
+    Hotspots.setVisible(on);
+    // quiet the basemap while the statewide view is up so the columns carry the picture
+    map.getContainer().classList.toggle('hotspots', on && Hotspots.loaded);
+    document.getElementById('hotLegend').dataset.mode = Hotspots.mode;
+  }
+  const hotModeEl = document.getElementById('hotMode');
+  function setHotMode(v) {
+    store.set('grouse.hotMode', v);
+    hotModeEl.querySelectorAll('button').forEach((b) => { const on = b.dataset.v === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+    Hotspots.setMode(v); syncHotspots();
+  }
+  hotModeEl.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setHotMode(b.dataset.v); });
+  setHotMode(store.get('grouse.hotMode', 'columns'));
   Hotspots.init(map, () => state).then((ok) => {
     if (!ok) return;
     syncHotspots(); updateTop();

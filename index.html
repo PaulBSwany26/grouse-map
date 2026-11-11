@@ -91,6 +91,12 @@
   details > summary h2 { display: inline; }
   details > summary::after { content: ' ▸'; color: var(--muted); }
   details[open] > summary::after { content: ' ▾'; }
+  .wpgroup { border-top: 1px solid var(--line); padding: 4px 0; }
+  .wpgroup summary { padding: 4px 0; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+  .wpgroup .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid #0003; }
+  label.wp { display: flex; gap: 6px; align-items: baseline; padding: 3px 0 3px 18px; font-size: 13px; flex-wrap: wrap; }
+  label.wp .nm { text-decoration: underline dotted; cursor: pointer; }
+  label.wp .meta, .wpgroup .meta { font-size: 11.5px; color: var(--muted); }
   ul.flushes { list-style: none; margin: 6px 0 0; padding: 0; max-height: 220px; overflow-y: auto; }
   ul.flushes li { display: flex; gap: 8px; align-items: center; padding: 4px; cursor: pointer; border-radius: 6px; }
   ul.flushes li:hover { background: var(--chip); }
@@ -205,10 +211,11 @@
       <h2>Your onX tracks &amp; waypoints</h2>
       <div class="btns">
         <label class="btn">Import GPX/KML<input id="importFile" type="file" accept=".gpx,.kml" multiple hidden></label>
-        <button class="btn" id="checkFlushes" type="button">Check my flushes</button>
+        <button class="btn" id="checkFlushes" type="button">Pick &amp; score flushes</button>
         <button class="btn" id="clearImports" type="button">Clear</button>
       </div>
       <div class="hint" id="importInfo">Export from onX (Markups → Export) and drop the file here or on the map.</div>
+      <div id="flushPicker" hidden></div>
       <div id="flushReport"></div>
     </section>
 
