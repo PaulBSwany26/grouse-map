@@ -1209,22 +1209,7 @@ ${pms}
   if (!standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) installHint.hidden = false;
 
   // Statewide hotspots (zoomed out)
-  function syncHotspots() {
-    if (!window.Hotspots) return;
-    const on = L_.stands.visible && map.getZoom() < 13;
-    Hotspots.setVisible(on);
-    // quiet the basemap while the statewide view is up so the columns carry the picture
-    map.getContainer().classList.toggle('hotspots', on && Hotspots.loaded);
-    document.getElementById('hotLegend').dataset.mode = Hotspots.mode;
-  }
-  const hotModeEl = document.getElementById('hotMode');
-  function setHotMode(v) {
-    store.set('grouse.hotMode', v);
-    hotModeEl.querySelectorAll('button').forEach((b) => { const on = b.dataset.v === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
-    Hotspots.setMode(v); syncHotspots();
-  }
-  hotModeEl.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setHotMode(b.dataset.v); });
-  setHotMode(store.get('grouse.hotMode', 'columns'));
+  function syncHotspots() { if (window.Hotspots) Hotspots.setVisible(L_.stands.visible && map.getZoom() < 13); }
   Hotspots.init(map, () => state).then((ok) => {
     if (!ok) return;
     syncHotspots(); updateTop();
