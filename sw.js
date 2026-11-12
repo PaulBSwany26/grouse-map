@@ -5,7 +5,7 @@
  *  - Feature data (stands, sales, land…) is stored by the app itself in IndexedDB, not here.
  * Bump VERSION whenever app files change so phones pick up the update.
  */
-const VERSION = 'v8';
+const VERSION = 'v9';
 const SHELL = `grouse-shell-${VERSION}`;
 const TILES = 'grouse-tiles';
 
@@ -19,7 +19,7 @@ const SHELL_FILES = [
   'https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css',
 ];
 
-const TILE_HOSTS = ['basemap.nationalmap.gov', 'server.arcgisonline.com', 'tile.opentopomap.org', 'tiles.globalforestwatch.org'];
+const TILE_HOSTS = ['basemap.nationalmap.gov', 'server.arcgisonline.com', 'tile.opentopomap.org', 'tiles.globalforestwatch.org', 'tiles.openfreemap.org'];
 const isTile = (url) => TILE_HOSTS.some((h) => url.hostname === h || url.hostname.endsWith('.' + h));
 
 self.addEventListener('install', (e) => {

@@ -11,7 +11,7 @@
 (function () {
   const H = window.Habitat;
   const CELL = 10; // px, flat grid
-  const CELL3 = 24, GAP3 = 7, HMAX = 110; // px at the matching Leaflet zoom: column grid / gap / tallest column
+  const CELL3 = 24, GAP3 = 11, HMAX = 84; // px at the matching Leaflet zoom: column grid / gap / tallest column
   let data = null, rows = null, buckets = null, layer = null, map = null, getState = null;
   let flat = null, mode = '3d', visible = true;
 
@@ -154,64 +154,146 @@
   }
 
   // ---- 3D view --------------------------------------------------------------------------
-  // Zoomed out, a tilted MapLibre map sits over the Leaflet map and shows the cells as
-  // real extruded columns. It hands back to Leaflet (flat, stand-level) at Leaflet zoom 13.
+  // Zoomed out, a tilted MapLibre map sits over the Leaflet map and shows each cell as a
+  // round-topped column. It hands back to Leaflet (flat, stand-level) at Leaflet zoom 13.
   // MapLibre zoom n shows what Leaflet shows at n + 1.
-  const PITCH = 52, HANDOFF = 12;
-  let gl = null, glEl = null, tip = null, glFailed = false, active = false, leaving = false, syncing = false;
-  let builtKey = null, hoverId = null, getBasemap = null;
+  const PITCH = 58, BEARING = -12, HANDOFF = 12;
+  const VECTOR_STYLE = 'https://tiles.openfreemap.org/styles/liberty';
+  const DEM_TILES = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
+  const CREDIT = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://openmaptiles.org">OpenMapTiles</a> · <a href="https://openfreemap.org">OpenFreeMap</a>';
+  const credit = (on) => { const a = map.attributionControl; if (a) { if (on && wantVector()) a.addAttribution(CREDIT); else a.removeAttribution(CREDIT); } };
+  const calm = () => window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const easeOut = (t) => 1 - Math.pow(1 - t, 3);
+  let gl = null, glEl = null, tip = null, compass = null, glFailed = false, active = false, leaving = false, syncing = false;
+  let builtKey = null, builtBox = null, hoverCid = null, getBasemap = null, vectorStyle = null, grow = 1, growRaf = 0;
 
-  function cellsGeoJSON(z) {
-    const agg = aggregate(z);
-    if (agg.geo) return agg.geo;
-    const F = CELL3 - GAP3, o = GAP3 / 2, features = [];
-    const ll = (x, y) => { const p = map.unproject([x, y], z); return [p.lng, p.lat]; };
-    for (const c of agg.list) {
-      const x = c.cx * CELL3 + o, y = c.cy * CELL3 + o;
-      const mPerPx = (40075016 * Math.cos((c.lat * Math.PI) / 180)) / (256 * Math.pow(2, z));
-      features.push({
-        type: 'Feature', id: features.length,
-        properties: { h: Math.max(1, c.frac * HMAX) * mPerPx, mean: c.mean, best: c.best, n: c.n, acres: Math.round(c.acres), lat: c.lat, lng: c.lng },
-        geometry: { type: 'Polygon', coordinates: [[ll(x, y), ll(x + F, y), ll(x + F, y + F), ll(x, y + F), ll(x, y)]] },
-      });
+  // Columns are stacked extrusions: a round body, then rings that close in like a dome.
+  const SIDES = 18, CAPS = 7, PARTS = CAPS + 1;
+  const RING = Array.from({ length: SIDES + 1 }, (_, i) => [Math.cos((i / SIDES) * 2 * Math.PI), Math.sin((i / SIDES) * 2 * Math.PI)]);
+  function circle(px, py, r, world) { // global pixel circle → lng/lat ring
+    const out = new Array(SIDES + 1);
+    for (let i = 0; i <= SIDES; i++) {
+      const x = (px + RING[i][0] * r) / world, y = (py + RING[i][1] * r) / world;
+      out[i] = [x * 360 - 180, (Math.atan(Math.sinh(Math.PI * (1 - 2 * y))) * 180) / Math.PI];
     }
-    return (agg.geo = { type: 'FeatureCollection', features });
+    return out;
+  }
+  function cellsGeoJSON(z, box) {
+    const R = (CELL3 - GAP3) / 2, world = 256 * Math.pow(2, z), features = [];
+    for (const c of aggregate(z).list) {
+      if (c.lng < box[0] || c.lng > box[2] || c.lat < box[1] || c.lat > box[3]) continue;
+      const px = (c.cx + 0.5) * CELL3, py = (c.cy + 0.5) * CELL3;
+      const mPerPx = (40075016 * Math.cos((c.lat * Math.PI) / 180)) / world;
+      const hpx = Math.max(1.2, c.frac * HMAX), cid = c.cx * 100003 + c.cy;
+      const props = { mean: c.mean, best: c.best, n: c.n, acres: Math.round(c.acres), lat: c.lat, lng: c.lng, cid };
+      const part = (i, r, b, h, t) => features.push({
+        type: 'Feature', id: cid * 8 + i, properties: { ...props, b: b * mPerPx, h: h * mPerPx, t },
+        geometry: { type: 'Polygon', coordinates: [circle(px, py, r, world)] },
+      });
+      if (hpx < 4) { part(0, R, 0, hpx, 0); continue; } // too little to stand up: a disc
+      const D = Math.min(R, hpx * 0.5), hb = hpx - D;
+      part(0, R, 0, hb, 0);
+      for (let k = 0; k < CAPS; k++) {
+        const t0 = (k / CAPS) * (Math.PI / 2), t1 = ((k + 1) / CAPS) * (Math.PI / 2);
+        part(k + 1, R * Math.cos((t0 + t1) / 2), hb + D * Math.sin(t0), hb + D * Math.sin(t1), (k + 1) / CAPS);
+      }
+    }
+    return { type: 'FeatureCollection', features };
   }
 
-  function glStyle() {
+  const cellLayer = () => {
+    const base = ['step', ['coalesce', ['get', 'mean'], 0], RAMP[0], 35, RAMP[1], 50, RAMP[2], 65, RAMP[3], 80, RAMP[4]];
+    return { id: 'cells', type: 'fill-extrusion', source: 'cells', paint: {
+      // the dome lightens toward its crown; a hovered column lights up whole
+      'fill-extrusion-color': ['case', ['boolean', ['feature-state', 'hover'], false], '#fffbe9',
+        ['interpolate', ['linear'], ['coalesce', ['get', 't'], 0], 0, base, 1, ['interpolate-lab', ['linear'], 0.26, 0, base, 1, '#ffffff']]],
+      'fill-extrusion-base': ['*', ['coalesce', ['get', 'b'], 0], grow],
+      'fill-extrusion-height': ['*', ['coalesce', ['get', 'h'], 0], grow],
+      'fill-extrusion-opacity': 0.94,
+    } };
+  };
+  const EMPTY = { type: 'FeatureCollection', features: [] };
+
+  function rasterStyle() { // satellite, or the fallback when the vector map can't be fetched
     const b = getBasemap();
     const tiles = b.url.includes('{s}') ? ['a', 'b', 'c'].map((s) => b.url.replace('{s}', s)) : [b.url];
     return {
       version: 8,
-      sources: {
-        base: { type: 'raster', tiles, tileSize: 256, maxzoom: b.maxzoom },
-        cells: { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
-      },
+      sources: { base: { type: 'raster', tiles, tileSize: 256, maxzoom: b.maxzoom }, cells: { type: 'geojson', data: EMPTY } },
       layers: [
-        { id: 'bg', type: 'background', paint: { 'background-color': '#e6e5df' } },
-        // the basemap steps back so the columns carry the picture
-        { id: 'base', type: 'raster', source: 'base', paint: { 'raster-saturation': -0.6, 'raster-contrast': -0.1, 'raster-brightness-min': 0.06 } },
-        { id: 'cells', type: 'fill-extrusion', source: 'cells', paint: {
-          'fill-extrusion-color': ['case', ['boolean', ['feature-state', 'hover'], false], '#1a1c1b',
-            ['step', ['coalesce', ['get', 'mean'], 0], RAMP[0], 35, RAMP[1], 50, RAMP[2], 65, RAMP[3], 80, RAMP[4]]],
-          'fill-extrusion-height': ['coalesce', ['get', 'h'], 0], 'fill-extrusion-opacity': 0.93,
-        } },
+        { id: 'bg', type: 'background', paint: { 'background-color': '#dfe5d6' } },
+        { id: 'base', type: 'raster', source: 'base', paint: { 'raster-saturation': 0.12, 'raster-contrast': 0.06 } },
+        cellLayer(),
       ],
     };
   }
+  // A full vector map: forests, lakes, rivers, roads and place names that stay crisp when tilted,
+  // recolored toward the north woods and shaded with real relief.
+  function vectorMapStyle() {
+    const st = JSON.parse(JSON.stringify(vectorStyle));
+    st.sources.dem = { type: 'raster-dem', tiles: [DEM_TILES], tileSize: 256, maxzoom: 12, encoding: 'terrarium' };
+    st.sources.cells = { type: 'geojson', data: EMPTY };
+    const tint = { background: ['background-color', '#eef0e1'], landcover_wood: ['fill-color', '#b4d39b'], landcover_grass: ['fill-color', '#d5e6b8'],
+      landcover_wetland: ['fill-color', '#c3dccb'], park: ['fill-color', '#c9e0ac'], water: ['fill-color', '#9cc8e6'], waterway_river: ['line-color', '#8fbfe0'],
+      waterway_other: ['line-color', '#8fbfe0'] };
+    st.layers = st.layers.filter((l) => l.type !== 'fill-extrusion' && l.id !== 'natural_earth');
+    for (const l of st.layers) {
+      if (tint[l.id]) { l.paint = l.paint || {}; l.paint[tint[l.id][0]] = tint[l.id][1]; if (l.id === 'landcover_wood') l.paint['fill-opacity'] = 0.75; }
+    }
+    const at = st.layers.findIndex((l) => /^waterway|^water$/.test(l.id));
+    st.layers.splice(at < 0 ? 1 : at, 0, { id: 'relief', type: 'hillshade', source: 'dem',
+      paint: { 'hillshade-exaggeration': 0.55, 'hillshade-shadow-color': '#3d5a3a', 'hillshade-highlight-color': '#fffdf0', 'hillshade-accent-color': '#5b7a4e' } });
+    st.layers.push(cellLayer());
+    return st;
+  }
+  const wantVector = () => vectorStyle && getBasemap().key !== 'imagery';
+  const glStyle = () => (wantVector() ? vectorMapStyle() : rasterStyle());
+  function dressScene() {
+    try { gl.setLight({ anchor: 'map', position: [1.4, 300, 38], intensity: 0.42, color: '#fff6e6' }); } catch (e) { /* older engines */ }
+    try { if (gl.setSky) gl.setSky({ 'sky-color': '#a9cdea', 'horizon-color': '#f4efe2', 'fog-color': '#f1eee2', 'sky-horizon-blend': 0.7, 'horizon-fog-blend': 0.8, 'fog-ground-blend': 0.72 }); } catch (e) { /* no sky */ }
+  }
 
-  function buildCells() {
+  function buildCells(force) {
     if (!gl || !gl.getSource('cells')) return;
     const z = Math.max(5, Math.min(12, Math.round(gl.getZoom()) + 1));
     const key = z + ':' + Math.max(getState().minScore, 20);
-    if (key === builtKey) return;
-    builtKey = key; hoverId = null;
-    gl.getSource('cells').setData(cellsGeoJSON(z));
+    const vb = gl.getBounds(), w = vb.getWest(), e = vb.getEast(), so = vb.getSouth(), n = vb.getNorth();
+    if (!force && key === builtKey && builtBox && w >= builtBox[0] && so >= builtBox[1] && e <= builtBox[2] && n <= builtBox[3]) return;
+    const px = (e - w) * 0.6, py = (n - so) * 0.6;
+    builtKey = key; builtBox = [w - px, so - py, e + px, n + py]; hoverCid = null;
+    gl.getSource('cells').setData(cellsGeoJSON(z, builtBox));
   }
 
+  // Columns rise out of the ground and sink back into it.
+  function setGrow(v) {
+    grow = v;
+    if (!gl || !gl.getLayer('cells')) return;
+    gl.setPaintProperty('cells', 'fill-extrusion-base', ['*', ['coalesce', ['get', 'b'], 0], v]);
+    gl.setPaintProperty('cells', 'fill-extrusion-height', ['*', ['coalesce', ['get', 'h'], 0], v]);
+  }
+  function growTo(to, ms, then) {
+    cancelAnimationFrame(growRaf);
+    if (calm() || !ms) { setGrow(to); if (then) then(); return; }
+    const from = grow, t0 = performance.now(); let last = 0;
+    const step = (now) => {
+      const t = Math.min(1, (now - t0) / ms);
+      if (t === 1 || now - last > 40) { last = now; setGrow(from + (to - from) * easeOut(t)); }
+      if (t < 1) growRaf = requestAnimationFrame(step); else if (then) then();
+    };
+    growRaf = requestAnimationFrame(step);
+  }
+
+  function setHover(cid) {
+    if (cid === hoverCid) return;
+    for (const [id, on] of [[hoverCid, false], [cid, true]]) {
+      if (id == null) continue;
+      for (let i = 0; i < PARTS; i++) gl.setFeatureState({ source: 'cells', id: id * 8 + i }, { hover: on });
+    }
+    hoverCid = cid;
+  }
   function hideTip() {
-    if (tip) tip.hidden = true;
-    if (gl && hoverId != null) { gl.setFeatureState({ source: 'cells', id: hoverId }, { hover: false }); hoverId = null; }
+    if (tip) tip.classList.remove('on');
+    if (gl && gl.getSource('cells')) setHover(null);
     if (gl) gl.getCanvas().style.cursor = '';
   }
 
@@ -222,21 +304,34 @@
       glEl = L.DomUtil.create('div', 'map3d', map.getContainer());
       L.DomEvent.disableClickPropagation(glEl); L.DomEvent.disableScrollPropagation(glEl);
       tip = L.DomUtil.create('div', 'hot-tip', map.getContainer());
-      tip.hidden = true;
       const c = map.getCenter();
       gl = new maplibregl.Map({
         container: glEl, style: glStyle(), center: [c.lng, c.lat], zoom: map.getZoom() - 1, pitch: 0,
-        minZoom: 4, maxZoom: HANDOFF + 0.6, maxPitch: 60, attributionControl: false, fadeDuration: 150,
-        maxBounds: [[-95, 39.5], [-78, 50]], // the data is Michigan; a hard fling can't leave the Great Lakes
+        minZoom: 4, maxZoom: HANDOFF + 0.6, maxPitch: 72, attributionControl: false, fadeDuration: 200,
+        maxBounds: [[-97, 38], [-76, 51]], // the data is Michigan; a hard fling can't leave the Great Lakes
       });
     } catch (e) { console.warn('3D view unavailable', e); glFailed = true; if (glEl) glEl.remove(); gl = null; return false; }
-    gl.on('load', buildCells);
+    // Compass: turns with the map, tap to face north again.
+    const Compass = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd() {
+        const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control compass');
+        div.innerHTML = '<a href="#" role="button" title="Face north" aria-label="Face north"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 15.4 12H8.6L12 3.5Z" fill="currentColor"/><path d="M12 20.5 8.6 12h6.8L12 20.5Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg></a>';
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.on(div, 'click', (e) => { L.DomEvent.preventDefault(e); if (active) gl.easeTo({ bearing: 0, pitch: PITCH, duration: 700 }); });
+        return div;
+      },
+    });
+    compass = new Compass().addTo(map).getContainer();
+    const needle = compass.querySelector('svg');
+    gl.on('rotate', () => { needle.style.transform = `rotate(${-gl.getBearing()}deg)`; });
     gl.on('error', (e) => console.warn('3D map:', e && e.error ? e.error.message || e.error : e));
-    gl.on('styledata', () => { if (gl.getSource('cells') && builtKey == null) buildCells(); });
-    gl.on('zoomend', buildCells);
+    gl.on('load', () => { dressScene(); buildCells(true); });
+    gl.on('styledata', () => { if (gl.getSource('cells') && builtKey == null) { dressScene(); buildCells(true); } });
     gl.on('zoom', () => { if (active && !leaving && gl.getZoom() >= HANDOFF) leave(true); });
     gl.on('moveend', () => { // keep Leaflet (lists, saved view, data loading) on the same spot
       if (!active || leaving) return;
+      buildCells();
       const p = gl.getCenter();
       syncing = true;
       map.setView([p.lat, p.lng], Math.max(5, Math.min(12, Math.round(gl.getZoom()) + 1)), { animate: false });
@@ -245,24 +340,30 @@
     gl.on('mousemove', 'cells', (e) => {
       const f = e.features && e.features[0];
       if (!f || leaving) return;
-      if (f.id !== hoverId) {
-        if (hoverId != null) gl.setFeatureState({ source: 'cells', id: hoverId }, { hover: false });
-        hoverId = f.id; gl.setFeatureState({ source: 'cells', id: hoverId }, { hover: true });
-        const p = f.properties;
+      const p = f.properties;
+      if (p.cid !== hoverCid) {
+        setHover(p.cid);
         tip.innerHTML = `<b>${p.acres.toLocaleString()} ac</b> of cover scoring ${Math.max(getState().minScore, 20)}+` +
           `<span>${p.n} stand${p.n === 1 ? '' : 's'} · average ${p.mean} · best ${p.best}</span>`;
       }
       gl.getCanvas().style.cursor = 'pointer';
-      tip.hidden = false; tip.style.left = e.point.x + 'px'; tip.style.top = e.point.y - 14 + 'px';
+      tip.classList.add('on'); tip.style.left = e.point.x + 'px'; tip.style.top = e.point.y - 16 + 'px';
     });
     gl.on('mouseleave', 'cells', hideTip);
-    gl.on('movestart', () => { if (tip) tip.hidden = true; });
+    gl.on('movestart', () => { if (tip) tip.classList.remove('on'); });
     gl.on('click', 'cells', (e) => { // tap a column → drop to the flat map over its good cover
       const p = e.features[0].properties;
       leave(true, { lng: p.lng, lat: p.lat });
     });
+    // Swap in the full vector map once it arrives (it is fetched once and reused).
+    if (!vectorStyle) {
+      fetch(VECTOR_STYLE).then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+        .then((j) => { vectorStyle = j; if (wantVector()) restyle(); })
+        .catch((e) => console.warn('vector basemap unavailable, using the raster map', e));
+    }
     return true;
   }
+  function restyle() { if (!gl) return; builtKey = null; builtBox = null; gl.setStyle(glStyle(), { diff: false }); credit(active); }
 
   function enter() {
     if (!ensureGL()) return false;
@@ -270,22 +371,26 @@
     active = true; leaving = false;
     gl.stop();
     gl.jumpTo({ center: [c.lng, c.lat], zoom: map.getZoom() - 1, pitch: 0, bearing: 0 });
+    setGrow(calm() ? 1 : 0);
     buildCells();
-    glEl.classList.add('on'); map.getContainer().classList.add('is3d');
+    glEl.classList.add('on'); map.getContainer().classList.add('is3d'); credit(true);
     gl.resize();
-    gl.easeTo({ pitch: PITCH, duration: 800 });
+    // the map leans back and turns a little while the columns rise
+    gl.easeTo({ pitch: PITCH, bearing: BEARING, duration: calm() ? 0 : 1500, easing: easeOut });
+    setTimeout(() => { if (active && !leaving) growTo(1, 1100); }, calm() ? 0 : 250);
     return true;
   }
 
   function leave(animated, target) {
     if (!active || leaving) return;
     hideTip();
-    const done = () => { active = false; leaving = false; glEl.classList.remove('on'); map.getContainer().classList.remove('is3d'); };
+    const done = () => { active = false; leaving = false; glEl.classList.remove('on'); map.getContainer().classList.remove('is3d'); credit(false); cancelAnimationFrame(growRaf); };
     if (!animated) { gl.stop(); done(); return; }
     leaving = true;
     const c = target || gl.getCenter();
     gl.stop();
-    gl.easeTo({ center: [c.lng, c.lat], zoom: HANDOFF, pitch: 0, bearing: 0, duration: 650 });
+    growTo(0, 420); // columns sink as the map levels out
+    gl.easeTo({ center: [c.lng, c.lat], zoom: HANDOFF, pitch: 0, bearing: 0, duration: calm() ? 0 : 800, easing: (t) => t * t * (3 - 2 * t) });
     gl.once('moveend', () => {
       syncing = true; map.setView([c.lat, c.lng], 13, { animate: false }); syncing = false;
       done(); sync();
@@ -313,7 +418,7 @@
       map.on('moveend', () => { // Leaflet moved by something other than the 3D map (zoom buttons, list taps)
         if (!active || leaving || syncing) return;
         const c = map.getCenter();
-        gl.easeTo({ center: [c.lng, c.lat], zoom: map.getZoom() - 1, pitch: PITCH, duration: 500 });
+        gl.easeTo({ center: [c.lng, c.lat], zoom: map.getZoom() - 1, pitch: PITCH, duration: 600, easing: easeOut });
       });
       map.on('click', (e) => {
         if (map.getZoom() >= 13 || !visible) return;
@@ -326,13 +431,13 @@
     },
     setVisible(on) { visible = !!on; sync(); },
     setMode(m) { mode = m === 'flat' ? 'flat' : '3d'; sync(); },
-    setBasemap() { if (gl) { builtKey = null; gl.setStyle(glStyle()); } },
+    setBasemap() { restyle(); },
     get mode() { return mode; },
     get is3d() { return active; },
     get gl() { return gl; }, // for debugging in the console
     redraw() {
       if (!rows) return;
-      scoreAll(); breaksCache = {}; aggCache = {}; builtKey = null;
+      scoreAll(); breaksCache = {}; aggCache = {}; builtKey = null; builtBox = null;
       if (flat && map.hasLayer(flat)) flat.redraw();
       buildCells();
     },

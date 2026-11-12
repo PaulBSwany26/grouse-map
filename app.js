@@ -837,7 +837,7 @@
         li.innerHTML = `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>
           <span><div>${esc(r.cover)}${r.age != null ? ', ' + r.age + 'y' : ''}${r.sale ? ' ' + ICON.warn : ''}</div><div class="meta">${r.acres} ac</div></span>`;
         li.addEventListener('click', () => { map.setView([r.lat, r.lng], 15); document.getElementById('panel').classList.remove('open'); });
-        ul.appendChild(li);
+        li.style.setProperty('--k', ul.children.length); ul.appendChild(li);
       }
       return;
     }
@@ -854,7 +854,7 @@
         setTimeout(() => l.openPopup(r.center), 350);
         document.getElementById('panel').classList.remove('open');
       });
-      ul.appendChild(li);
+      li.style.setProperty('--k', ul.children.length); ul.appendChild(li);
     }
   }
 
@@ -868,7 +868,7 @@
   const seasonEl = document.getElementById('season');
   function setSeason(v) {
     state.season = v; store.set('grouse.season', v);
-    seasonEl.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.v === v));
+    seasonEl.querySelectorAll('button').forEach((b, i) => { const on = b.dataset.v === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); if (on) seasonEl.style.setProperty('--i', i); });
     document.getElementById('seasonHint').textContent = SEASON_HINT[v];
     records.forEach(scoreRecord);
     L_.stands.restyle(); L_.usfs.restyle();
@@ -1376,12 +1376,12 @@ ${pms}
   const hotModeEl = document.getElementById('hotMode');
   function setHotMode(v) {
     store.set('grouse.hotMode', v);
-    hotModeEl.querySelectorAll('button').forEach((b) => { const on = b.dataset.v === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+    hotModeEl.querySelectorAll('button').forEach((b, i) => { const on = b.dataset.v === v; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); if (on) hotModeEl.style.setProperty('--i', i); });
     Hotspots.setMode(v); syncHotspots();
   }
   hotModeEl.addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setHotMode(b.dataset.v); });
   setHotMode(store.get('grouse.hotMode', '3d') === 'flat' ? 'flat' : '3d');
-  Hotspots.init(map, () => state, () => { const l = BASEMAPS[basemapKey]; return { url: l._url, maxzoom: l.options.maxNativeZoom || l.options.maxZoom }; }).then((ok) => {
+  Hotspots.init(map, () => state, () => { const l = BASEMAPS[basemapKey]; return { key: basemapKey, url: l._url, maxzoom: l.options.maxNativeZoom || l.options.maxZoom }; }).then((ok) => {
     if (!ok) return;
     syncHotspots(); updateTop();
     const i = Hotspots.info();
