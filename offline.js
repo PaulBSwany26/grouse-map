@@ -35,12 +35,17 @@
     return [w, s, e, n];
   }
 
+  // Saved rows per layer, read from the database once per visit: panning with no signal
+  // then filters in memory instead of re-reading everything on every move.
+  const mem = {};
+
   const OfflineStore = {
     available: typeof indexedDB !== 'undefined',
 
-    /** Store features for a layer. Copies are made synchronously (Leaflet adds circular refs later). */
+    /** Store features for a layer; resolves false if the device refused (storage full, private mode). Copies are made synchronously (Leaflet adds circular refs later). */
     async put(layer, feats) {
-      if (!this.available || !feats.length) return;
+      if (!feats.length) return true;
+      if (!this.available) return false;
       const rows = feats.map((f) => ({
         key: layer + '|' + f._id, layer, bbox: geomBBox(f.geometry),
         f: { type: 'Feature', id: f.id, _id: f._id, properties: f.properties, geometry: f.geometry },
@@ -50,20 +55,21 @@
         const st = tx.objectStore('features');
         rows.forEach((r) => st.put(r));
         await done(tx);
-      } catch (err) { console.warn('offline store failed', err); }
+        if (mem[layer]) (await mem[layer]).push(...rows);
+        return true;
+      } catch (err) { console.warn('offline store failed', err); return false; }
     },
 
     /** Features for a layer intersecting bounds (L.LatLngBounds), or all if bounds is null. */
     async query(layer, bounds) {
       if (!this.available) return [];
       try {
-        const st = (await db()).transaction('features').objectStore('features');
-        const rows = await reqP(st.index('layer').getAll(layer));
+        const rows = await (mem[layer] ||= (async () => reqP((await db()).transaction('features').objectStore('features').index('layer').getAll(layer)))());
         const hit = bounds
           ? rows.filter((r) => !(r.bbox[0] > bounds.getEast() || r.bbox[2] < bounds.getWest() || r.bbox[1] > bounds.getNorth() || r.bbox[3] < bounds.getSouth()))
           : rows;
         return hit.map((r) => r.f);
-      } catch (err) { console.warn('offline query failed', err); return []; }
+      } catch (err) { delete mem[layer]; console.warn('offline query failed', err); return []; }
     },
 
     async count() {
@@ -87,6 +93,7 @@
     },
 
     async clearAll() {
+      for (const k of Object.keys(mem)) delete mem[k];
       try {
         const tx = (await db()).transaction(['features', 'areas'], 'readwrite');
         tx.objectStore('features').clear(); tx.objectStore('areas').clear();

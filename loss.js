@@ -10,8 +10,11 @@
 (function () {
   const Z = 12; // GFW native zoom; tiles come back 512 px (≈14 m/px in Michigan)
   const PX = 512;
-  const URL = (x, y) => `https://tiles.globalforestwatch.org/umd_tree_cover_loss/latest/dynamic/${Z}/${x}/${y}.png?tree_cover_density_threshold=30`;
   const NOW = new Date().getFullYear();
+  // Tiles are kept on the phone forever, and the yearly data lands mid-year. The half-year tag
+  // makes a new address twice a year, so saved tiles pick up the new data.
+  const TILES = `https://tiles.globalforestwatch.org/umd_tree_cover_loss/latest/dynamic/{z}/{x}/{y}.png?tree_cover_density_threshold=30&v=${NOW}${new Date().getMonth() < 6 ? 'a' : 'b'}`;
+  const URL = (x, y) => TILES.replace('{z}', Z).replace('{x}', x).replace('{y}', y);
   const tiles = new Map(); // "x/y" → Promise<Uint8Array|null> (year offsets, 0 = no loss)
 
   function loadTile(x, y) {
@@ -98,6 +101,7 @@
 
   const api = {
     lastYear: 2025,
+    tiles: TILES, // {z}/{x}/{y} template, for saving an area offline
     /** Measure loss for stand records (needs rec.feature.geometry); sets rec.loss; calls done() once. */
     analyze(recs, done) {
       const queue = recs.filter((r) => r && r.feature && !r.lossDone);

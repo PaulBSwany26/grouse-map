@@ -130,6 +130,9 @@ def main():
         usfs += fetch_all(f"{EDW}/{lyr}", f"state_abbr='MI' AND fy_completed >= '{NOW - 30}'",
                           "objectid,activity_name,date_completed,gis_acres", "objectid", offset_deg=0.0003)
 
+    # A service that answers "no rows" without an error must not blank the published map.
+    if len(stands) < 100_000:
+        sys.exit(f"only {len(stands)} stands came back (expected about 190,000): not writing {OUT}")
     rows, geoms = [], []
     for f in stands:
         a, g = f["properties"], f.get("geometry")
@@ -189,7 +192,9 @@ def main():
     own = np.array([cls(r) for r in rows], dtype=np.int64)
     flags = np.zeros(len(rows), dtype=np.int64)
     a_idx, b_idx = pairs
-    mask = a_idx != b_idx
+    # Stand-to-stand pairs only, as on the live map: USFS cuts get no neighbor bonus and give none.
+    is_usfs = np.array([r["g"].startswith("usfs") for r in rows])
+    mask = (a_idx != b_idx) & ~is_usfs[a_idx] & ~is_usfs[b_idx]
     np.bitwise_or.at(flags, a_idx[mask], own[b_idx[mask]])
 
     # Position: a point inside each polygon; fall back to the raw coordinates' mean if repair emptied it

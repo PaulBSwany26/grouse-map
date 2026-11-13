@@ -19,6 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: node tools/test_habitat.mjs
       - run: pip install "shapely>=2" numpy
       - run: python tools/build_summary.py
       - name: Commit if changed

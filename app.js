@@ -79,7 +79,6 @@
   });
 
   // Satellite canopy loss by year (loss.js): red = cut in last 3 years, teal = 4–20 years ago.
-  const LOSS_TILE_URL = 'https://tiles.globalforestwatch.org/umd_tree_cover_loss/latest/dynamic/{z}/{x}/{y}.png?tree_cover_density_threshold=30';
   const lossLayer = LossRaster.layer({ pane: 'loss', minZoom: 10 });
 
   // Recent Sentinel-2 imagery (10 m, every few days) via Microsoft Planetary Computer — shows
@@ -180,20 +179,31 @@
       const q = c.statewide ? null : view.pad(0.3);
       if (this.abort) this.abort.abort();
       const ac = (this.abort = new AbortController());
+      // A weak signal can leave a request hanging for minutes. Saved data for this view goes on
+      // the map after 2.5 s (at once with no signal), and the request gives up after 30 s.
+      let settled = false, timedOut = false;
+      const showSaved = async () => {
+        const saved = await OfflineStore.query(this.key, q);
+        if (!settled && !ac.signal.aborted) this.ingest(saved, false);
+        return saved.length;
+      };
+      const early = setTimeout(showSaved, navigator.onLine === false ? 0 : 2500);
+      const giveUp = setTimeout(() => { timedOut = true; ac.abort(); }, 30000);
       try {
         const feats = await this.fetchNetwork(q, ac.signal);
         if (ac.signal.aborted) return 'aborted';
+        settled = true;
         this.loaded.push(q || view);
         this.ingest(feats, true);
         return 'loaded';
       } catch (err) {
-        if (err.name === 'AbortError') throw err;
-        // No signal (or service down): fall back to anything stored for this area.
-        const cached = await OfflineStore.query(this.key, q);
-        if (!cached.length) throw err;
-        this.ingest(cached, false);
+        if (err.name === 'AbortError' && !timedOut) throw err; // replaced by a newer refresh
+        // No signal, too slow, or service down: fall back to anything stored for this area.
+        const saved = await OfflineStore.query(this.key, q);
+        if (!saved.length) throw timedOut ? new Error('timed out') : err;
+        this.ingest(saved, false);
         return 'offline';
-      }
+      } finally { clearTimeout(early); clearTimeout(giveUp); }
     }
     async fetchNetwork(bounds, signal, maxPages) {
       const c = this.cfg;
@@ -225,12 +235,14 @@
     /** Bulk-load a whole area for offline use, regardless of zoom or visibility. */
     async saveArea(bounds) {
       const feats = await this.fetchNetwork(this.cfg.statewide ? null : bounds, undefined, 40);
-      await OfflineStore.put(this.key, feats);
+      if (!(await OfflineStore.put(this.key, feats))) throw new Error('could not store on this device');
       this.ingest(feats, false);
       if (!this.cfg.statewide) this.loaded.push(bounds);
       return feats.length;
     }
     restyle() { this.group.setStyle((f) => this.cfg.style(f)); }
+    /** Restyle a few features (new or rescored), not every shape ever loaded. */
+    restyleOnly(feats) { for (const f of feats) if (f && f._layer) f._layer.setStyle(this.cfg.style(f)); }
   }
 
   // ---------------------------------------------------------------------------
@@ -520,9 +532,9 @@
     onNew: (fresh) => {
       const dirty = linkNeighbors(fresh.map((f) => records.get(f._id)));
       dirty.forEach(scoreRecord);
-      L_.stands.restyle();
+      L_.stands.restyleOnly([...dirty].map((r) => r.feature));
       if (window.LossRaster) LossRaster.analyze(fresh.map((f) => records.get(f._id)), () => {
-        fresh.forEach((f) => scoreRecord(records.get(f._id))); L_.stands.restyle(); updateTop(); });
+        fresh.forEach((f) => scoreRecord(records.get(f._id))); L_.stands.restyleOnly(fresh); updateTop(); });
     },
   });
   L_.usfs = new DataLayer({
@@ -559,9 +571,9 @@
         target.get(p.StandID).push(entry);
         touched.add(p.StandID);
       }
-      let changed = false;
-      touched.forEach((sid) => { const r = standsById.get(sid); if (r) { scoreRecord(r); changed = true; } });
-      if (changed) { L_.stands.restyle(); }
+      const changed = [];
+      touched.forEach((sid) => { const r = standsById.get(sid); if (r) { scoreRecord(r); changed.push(r.feature); } });
+      L_.stands.restyleOnly(changed);
     },
   });
   L_.gems = new DataLayer({
@@ -1084,11 +1096,13 @@
       if (!best || (best.kind === 'usfs' && r.kind === 'stand')) best = r;
     }
     const lands = [];
-    let landChecked = false;
+    let landChecked = false, landLoaded = true;
+    const spot = L.latLngBounds(e.latlng, e.latlng);
     for (const [k, fmt] of LAND_LABELS) {
       const layer = L_[k];
       if (!layer.visible) continue;
       landChecked = true;
+      if (!layer.covers(spot)) landLoaded = false;
       for (const f of layer.features.values()) if (inGeom(pt, f.geometry)) { lands.push(fmt(f.properties)); break; }
     }
     const standLine = best
@@ -1096,7 +1110,8 @@
       : `<span class="score" style="background:#ccc">–</span> No stand data here`;
     const landLine = !landChecked ? '' : lands.length
       ? `<div class="h-land ok">${ICON.check}<span>${esc(lands.join(' · '))}</span></div>`
-      : `<div class="h-land warn">${ICON.warn}<span>Not on mapped public land. Check boundaries.</span></div>`;
+      : landLoaded ? `<div class="h-land warn">${ICON.warn}<span>Not on mapped public land. Check boundaries.</span></div>`
+      : `<div class="h-sub">Land outlines aren't loaded for this spot, so public land can't be checked.</div>`;
     hereEl.hidden = false;
     const cutLine = best && best.cut ? `<div class="h-land warn">${ICON.warn}<span>${esc(best.cut.text)}</span></div>` : '';
     hereEl.innerHTML = `<div class="h-main">${standLine}</div>${cutLine}${landLine}<div class="h-sub">±${Math.round(e.accuracy)} m${
@@ -1293,8 +1308,9 @@
       if (!kind) continue;
       imports.push({ name: file.name, kind, text: await file.text() });
     }
-    if (!store.set('grouse.imports', imports)) importInfo.textContent = 'Too large to remember between visits — shown for this session only.';
+    const kept = store.set('grouse.imports', imports);
     renderImports(true);
+    if (!kept) importInfo.textContent += ' Too large to remember between visits: shown for this session only.';
   }
   document.getElementById('importFile').addEventListener('change', (e) => addFiles([...e.target.files]));
   document.getElementById('clearImports').addEventListener('click', () => { imports = []; store.set('grouse.imports', imports); renderImports(false); });
@@ -1360,7 +1376,7 @@ ${pms}
     areasEl.innerHTML = '';
     for (const a of areas.sort((x, y) => y.id - x.id)) {
       const li = document.createElement('li');
-      li.innerHTML = `<span><div>${esc(a.name)}</div><div class="meta">${new Date(a.id).toLocaleDateString()} · ${a.features.toLocaleString()} features · ${a.tiles.toLocaleString()} tiles (to z${a.zMax})</div></span>
+      li.innerHTML = `<span><div>${esc(a.name)}</div><div class="meta">${new Date(a.id).toLocaleDateString()} · ${a.features.toLocaleString()} features · ${a.tiles.toLocaleString()} tiles (to z${a.zMax})${a.failed && a.failed.length ? ` · <span class="warn-i">${a.failed.length} layer(s) missing</span>` : ''}</div></span>
         <button class="btn" type="button" data-go>Go</button><button class="btn icon" type="button" data-del aria-label="Remove">${ICON.close}</button>`;
       li.querySelector('[data-go]').addEventListener('click', () => {
         map.fitBounds(L.latLngBounds(a.bounds)); sheetTo('peek');
@@ -1379,27 +1395,29 @@ ${pms}
     let features = 0;
     try {
       // 1) Feature data for every layer
-      const layers = Object.entries(L_);
+      const layers = Object.entries(L_), failed = [];
       for (let i = 0; i < layers.length; i++) {
         offlineInfo.textContent = `Saving map data ${i + 1}/${layers.length}…`;
-        try { features += await layers[i][1].saveArea(bounds); } catch (err) { console.warn('save failed', layers[i][0], err); }
+        try { features += await layers[i][1].saveArea(bounds); } catch (err) { failed.push(layers[i][0]); console.warn('save failed', layers[i][0], err); }
       }
+      const failedNames = failed.map((k) => (ROWS.find((r) => r.members && r.members.includes(L_[k])) || { label: k }).label.replace(/ \(.*/, ''));
       // 2) USGS topo tiles (public domain) — as deep as fits under the tile cap
       let zMax = 16, topo;
       const zMin = Math.max(8, Math.min(map.getZoom() - 2, 12));
       do { topo = OfflineTiles.tileUrls(USGS_TILE, bounds, zMin, zMax); } while (topo.length > MAX_TILES && --zMax > zMin);
       // 3) Canopy-loss tiles (native to z12)
-      const loss = OfflineTiles.tileUrls(LOSS_TILE_URL, bounds, 12, 12);
+      const loss = OfflineTiles.tileUrls(LossRaster.tiles, bounds, 12, 12);
       const urls = topo.concat(loss);
       const res = await OfflineTiles.prefetch(urls, (d, t) => { offlineInfo.textContent = `Saving map tiles ${d.toLocaleString()} / ${t.toLocaleString()}…`; });
       const c = bounds.getCenter();
       await OfflineStore.saveAreaRecord({
         id: Date.now(), name: `Near ${c.lat.toFixed(3)}, ${c.lng.toFixed(3)}`,
         bounds: [[bounds.getSouth(), bounds.getWest()], [bounds.getNorth(), bounds.getEast()]],
-        features, tiles: res.ok + res.skipped, zMax,
+        features, tiles: res.ok + res.skipped, zMax, failed: failedNames,
       });
       await refreshOfflineInfo();
-      offlineInfo.textContent = `Saved: ${features.toLocaleString()} features, ${(res.ok + res.skipped).toLocaleString()} tiles (topo to zoom ${zMax})` +
+      offlineInfo.textContent = (failedNames.length ? `Not fully saved. These layers failed: ${[...new Set(failedNames)].join(', ')}. Tap Save this area again. ` : '') +
+        `Saved: ${features.toLocaleString()} features, ${(res.ok + res.skipped).toLocaleString()} tiles (topo to zoom ${zMax})` +
         (res.fail ? `, ${res.fail} tiles failed` : '') + '. Use the USGS Topo basemap offline.';
       L_.stands.restyle(); updateTop();
     } finally {
