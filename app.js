@@ -543,7 +543,7 @@
     outFields: 'OBJECTID,StandID,SaleName,SaleNumber,ProposalStatusShortDesc,ProposedStartDate,RxSpecs,TreatmentName,Acres',
     style: (f) => {
       const sold = (f.properties.ProposalStatusShortDesc || '').trim() === 'SOLD';
-      return { color: sold ? '#6a3d9a' : '#1f78b4', weight: 2, dashArray: '6 4', opacity: 0.95, fill: true,
+      return { color: sold ? '#6a3d9a' : '#1f78b4', weight: 2, dashArray: sold ? null : '6 4', opacity: 0.95, fill: true,
         fillColor: sold ? '#6a3d9a' : '#1f78b4', fillOpacity: 0.08 };
     },
     popup: salePopup,
@@ -748,7 +748,7 @@
     { key: 'stands', label: 'Grouse habitat (DNR stands)', swatch: [RAMP[3], RAMP[2]], members: [L_.stands], on: true },
     { key: 'usfs', label: 'USFS harvests, scored (dashed)', swatch: [RAMP[2], '#5a1a00'], members: [L_.usfs], on: true },
     { key: 'gems', label: 'GEMS grouse areas', swatch: ['transparent', '#c62828'], members: [L_.gems], on: true },
-    { key: 'sales', label: 'DNR timber sales (purple sold, blue upcoming)', swatch: ['transparent', '#6a3d9a'], members: [L_.treatments], on: true },
+    { key: 'sales', label: 'DNR timber sales (solid purple sold, dashed blue upcoming)', swatch: ['transparent', '#6a3d9a'], members: [L_.treatments], on: true },
     { key: 'loss', label: 'Cuts by year from satellite (red = last 3 yrs, teal = 4–20 yrs)', swatch: ['#0097a7', '#c62828'], tile: lossLayer, on: false },
     { key: 's2', label: `Recent satellite photo (${S2_WIN[0].slice(5)} to ${S2_WIN[1].slice(5)}, ${S2_WIN[1].slice(0, 4)})`, swatch: ['#6d7b5a', '#6d7b5a'], tile: s2Layer, on: false },
     { key: 'stateForest', label: 'State Forest', swatch: ['transparent', '#2e7d32'], members: [L_.stateForest], on: true },
@@ -833,10 +833,10 @@
       const hs = Hotspots.top(map.getBounds(), 12, Math.max(state.minScore, 1));
       ul.innerHTML = hs.length ? '' : '<li class="meta">Nothing above the threshold in view.</li>';
       for (const r of hs) {
-        const li = document.createElement('li');
+        const li = document.createElement('li'); li.tabIndex = 0; li.setAttribute('role', 'button');
         li.innerHTML = `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>
           <span><div>${esc(r.cover)}${r.age != null ? ', ' + r.age + 'y' : ''}${r.sale ? ' ' + ICON.warn : ''}</div><div class="meta">${r.acres} ac</div></span>`;
-        li.addEventListener('click', () => { map.setView([r.lat, r.lng], 15); document.getElementById('panel').classList.remove('open'); });
+        li.addEventListener('click', () => { map.setView([r.lat, r.lng], 15); sheetTo('peek'); });
         li.style.setProperty('--k', ul.children.length); ul.appendChild(li);
       }
       return;
@@ -845,14 +845,14 @@
     if (!top.length) { ul.innerHTML = `<li class="meta">${zoomedOut ? 'Zoom in to see scored stands.' : 'Nothing above the threshold here.'}</li>`; return; }
     ul.innerHTML = '';
     for (const r of top) {
-      const li = document.createElement('li');
+      const li = document.createElement('li'); li.tabIndex = 0; li.setAttribute('role', 'button');
       li.innerHTML = `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>
         <span><div>${esc(label(r))}${r.cut ? ' ' + ICON.warn : ''}</div><div class="meta">${r.acres ? r.acres.toFixed(0) + ' ac' : ''}${r.cut ? ' · ' + (r.cut.kind === 'fresh' ? 'fresh cut' : 'active sale') : ''}</div></span>`;
       li.addEventListener('click', () => {
         const l = r.feature._layer;
         map.fitBounds(l.getBounds(), { maxZoom: 16, paddingTopLeft: panelPad().add([20, 20]), paddingBottomRight: [40, 40] });
         setTimeout(() => l.openPopup(r.center), 350);
-        document.getElementById('panel').classList.remove('open');
+        sheetTo('peek');
       });
       li.style.setProperty('--k', ul.children.length); ul.appendChild(li);
     }
@@ -924,9 +924,68 @@
   renderWeights();
 
   // Mobile bottom sheet
+  // Three resting heights (peek, mid, open). Drag the header to resize, or tap it to step through them.
   const panel = document.getElementById('panel');
-  document.getElementById('panelHeader').addEventListener('click', (e) => {
-    if (window.innerWidth <= 700) panel.classList.toggle('open');
+  const sheetToggle = document.getElementById('toggle');
+  const panelBody = document.getElementById('panelBody');
+  const sheetHeader = document.getElementById('panelHeader');
+  const isSheet = () => window.innerWidth <= 700;
+  let sheetState = 'peek';
+  function sheetTo(state) {
+    sheetState = state;
+    // The collapsed height follows the header, which grows with the system text size.
+    document.documentElement.style.setProperty('--peek', sheetHeader.offsetHeight + 'px');
+    panel.classList.toggle('mid', state === 'mid');
+    panel.classList.toggle('open', state === 'open');
+    document.body.classList.toggle('sheet-mid', state !== 'peek');
+    sheetToggle.setAttribute('aria-expanded', String(state !== 'peek'));
+    // Collapsed, the options are off screen: keep them out of the tab order too.
+    panelBody.inert = isSheet() && state === 'peek';
+    if (state === 'peek') { panel.scrollTop = 0; panelBody.scrollTop = 0; }
+  }
+  {
+    const heights = () => ({ peek: sheetHeader.offsetHeight, mid: window.innerHeight * 0.46, open: window.innerHeight * 0.84 });
+    let drag = null, dragged = false;
+    sheetHeader.addEventListener('pointerdown', (e) => {
+      if (!isSheet() || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      drag = { y: e.clientY, h: panel.offsetHeight, t: e.timeStamp, moved: false };
+      dragged = false;
+    });
+    sheetHeader.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const dy = e.clientY - drag.y;
+      if (!drag.moved && Math.abs(dy) < 6) return;
+      if (!drag.moved) { drag.moved = true; panel.classList.add('dragging'); try { sheetHeader.setPointerCapture(e.pointerId); } catch (_) {} }
+      const hs = heights();
+      panel.style.height = Math.max(hs.peek, Math.min(hs.open, drag.h - dy)) + 'px';
+    });
+    const end = (e) => {
+      if (!drag) return;
+      const d = drag; drag = null;
+      if (!d.moved) return;
+      dragged = true;
+      const hs = heights(), h = panel.offsetHeight;
+      // A quick flick goes one step in its direction; a slow drag settles on the nearest height.
+      const v = (e.clientY - d.y) / Math.max(1, e.timeStamp - d.t);
+      const order = ['peek', 'mid', 'open'];
+      let to = order.reduce((a, b) => (Math.abs(hs[b] - h) < Math.abs(hs[a] - h) ? b : a));
+      if (Math.abs(v) > 0.5) to = order[Math.max(0, Math.min(2, order.indexOf(sheetState) + (v < 0 ? 1 : -1)))];
+      panel.classList.remove('dragging'); panel.style.height = '';
+      sheetTo(to);
+    };
+    sheetHeader.addEventListener('pointerup', end);
+    sheetHeader.addEventListener('pointercancel', end);
+    sheetToggle.addEventListener('click', () => {
+      if (dragged) { dragged = false; return; }
+      sheetTo(sheetState === 'peek' ? 'mid' : sheetState === 'mid' ? 'open' : 'peek');
+    });
+    window.addEventListener('resize', () => sheetTo(sheetState));
+    sheetTo('peek');
+  }
+  // Rows and cards that act like buttons answer Enter and Space.
+  document.addEventListener('keydown', (e) => {
+    if ((e.key !== 'Enter' && e.key !== ' ') || !e.target.matches || !e.target.matches('li[role=button], span[role=button], div[role=button]')) return;
+    e.preventDefault(); e.target.click();
   });
 
   // ---------------------------------------------------------------------------
@@ -939,7 +998,7 @@
   const hereEl = document.getElementById('here');
   let locateBtn = null;
   const Locate = L.Control.extend({
-    options: { position: 'topright' },
+    options: { position: window.innerWidth <= 700 ? 'bottomright' : 'topright' },
     onAdd() {
       const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control locate');
       div.innerHTML = `<a href="#" title="Track my location" role="button" aria-label="Track my location">${ICON.locate}</a>`;
@@ -1042,7 +1101,9 @@
     const cutLine = best && best.cut ? `<div class="h-land warn">${ICON.warn}<span>${esc(best.cut.text)}</span></div>` : '';
     hereEl.innerHTML = `<div class="h-main">${standLine}</div>${cutLine}${landLine}<div class="h-sub">±${Math.round(e.accuracy)} m${
       navigator.onLine === false ? ' · offline' : ''}</div>`;
-    if (best) hereEl.onclick = () => best.feature._layer.openPopup(best.center || e.latlng);
+    hereEl.onclick = best ? () => best.feature._layer.openPopup(best.center || e.latlng) : null;
+    if (best) { hereEl.tabIndex = 0; hereEl.setAttribute('role', 'button'); hereEl.setAttribute('aria-label', 'Open details for the stand you are in'); }
+    else { hereEl.removeAttribute('tabindex'); hereEl.removeAttribute('role'); hereEl.removeAttribute('aria-label'); }
   }
 
   // ---------------------------------------------------------------------------
@@ -1133,7 +1194,7 @@
         return `<details class="wpgroup" ${k ? 'open' : ''}><summary><input type="checkbox" data-group="${esc(g)}" ${k === ws.length ? 'checked' : ''}>
           <span class="dot" style="background:${esc(color || '#999')}"></span> ${esc(icon)} <span class="meta">(${k}/${ws.length} ticked)</span></summary>
           ${ws.map((w) => `<label class="wp"><input type="checkbox" data-k="${esc(w.key)}" ${isPicked(w) ? 'checked' : ''}>
-            <span class="nm" data-go="${esc(w.key)}">${esc(w.name)}</span><span class="meta">${species(w) === 'woodcock' ? '<b>woodcock</b> · ' : ''}${fmt(w.date)}${inMichigan(w) ? '' : ' · outside MI'}${w.notes ? ' · ' + esc(w.notes.slice(0, 40)) : ''}</span></label>`).join('')}
+            <span class="nm" role="button" tabindex="0" data-go="${esc(w.key)}">${esc(w.name)}</span><span class="meta">${species(w) === 'woodcock' ? '<b>woodcock</b> · ' : ''}${fmt(w.date)}${inMichigan(w) ? '' : ' · outside MI'}${w.notes ? ' · ' + esc(w.notes.slice(0, 40)) : ''}</span></label>`).join('')}
         </details>`; }).join('')}
       <div class="btns" style="margin-top:8px"><button class="btn primary" type="button" data-act="score">Score ${nPicked} ticked flush${nPicked === 1 ? '' : 'es'}${nWood ? ` (${nPicked - nWood} grouse, ${nWood} woodcock)` : ''}</button></div>`;
     drawFlushMarks();
@@ -1141,7 +1202,9 @@
   function drawFlushMarks() {
     flushMarks.clearLayers();
     for (const w of waypoints.filter(isPicked)) {
-      L.circleMarker([w.lat, w.lng], { pane: 'imports', radius: 8, color: '#fff', weight: 2.5, fillColor: species(w) === 'woodcock' ? '#6d4c41' : '#ff6f00', fillOpacity: 1 })
+      const wood = species(w) === 'woodcock';
+      (wood ? L.marker([w.lat, w.lng], { pane: 'imports', keyboard: false, icon: L.divIcon({ className: 'flush-wood', html: '<i></i>', iconSize: [16, 16] }) })
+        : L.circleMarker([w.lat, w.lng], { pane: 'imports', radius: 8, color: '#fff', weight: 2.5, fillColor: '#ff6f00', fillOpacity: 1 }))
         .bindTooltip((species(w) === 'woodcock' ? 'Woodcock: ' : 'Grouse: ') + esc(w.name)).addTo(flushMarks);
     }
   }
@@ -1159,7 +1222,7 @@
   });
   pickerEl.addEventListener('click', (e) => {
     const go = e.target.dataset && e.target.dataset.go;
-    if (go) { e.preventDefault(); const w = waypoints.find((x) => x.key === go); if (w) { map.setView([w.lat, w.lng], 16); panel.classList.remove('open'); } return; }
+    if (go) { e.preventDefault(); const w = waypoints.find((x) => x.key === go); if (w) { map.setView([w.lat, w.lng], 16); sheetTo('peek'); } return; }
     const act = e.target.dataset && e.target.dataset.act;
     if (act === 'suggest') { picks = {}; store.set('grouse.flushPicks', picks); renderPicker(); }
     if (act === 'none') { waypoints.forEach((w) => (picks[w.key] = false)); store.set('grouse.flushPicks', picks); renderPicker(); }
@@ -1212,7 +1275,7 @@
       (sp('woodcock').length ? `<br>By species (median, count): ${spLine}. The model is built for grouse; woodcock favor wetter, younger alder and aspen.` : '') +
       (scored.length ? `<br>Cover at flushes: ${Object.entries(byCover).sort((a, b) => b[1] - a[1]).map(([c, n]) => `${esc(c)} ${n}`).join(' · ')}` : '') +
       `</div><ul class="flushes">` +
-      results.map((r, i) => `<li data-i="${i}">${r.none ? '<span class="score" style="background:#ccc">–</span>'
+      results.map((r, i) => `<li data-i="${i}" role="button" tabindex="0">${r.none ? '<span class="score" style="background:#ccc">–</span>'
         : `<span class="score" style="background:${rampColor(r.score)};${r.score >= 80 ? 'color:#fff' : ''}">${r.score}</span>`}
         <span>${esc(r.w.name)}${species(r.w) === 'woodcock' ? ' <b>(woodcock)</b>' : ''}<div class="meta">${r.none ? esc(r.why) : esc(r.cover) + (r.age != null ? ', ' + r.age + 'y' : '')}</div></span></li>`).join('') + '</ul>';
     flushEl.querySelectorAll('li').forEach((li) => li.addEventListener('click', () => map.setView(results[+li.dataset.i].ll, 16)));
@@ -1300,7 +1363,7 @@ ${pms}
       li.innerHTML = `<span><div>${esc(a.name)}</div><div class="meta">${new Date(a.id).toLocaleDateString()} · ${a.features.toLocaleString()} features · ${a.tiles.toLocaleString()} tiles (to z${a.zMax})</div></span>
         <button class="btn" type="button" data-go>Go</button><button class="btn icon" type="button" data-del aria-label="Remove">${ICON.close}</button>`;
       li.querySelector('[data-go]').addEventListener('click', () => {
-        map.fitBounds(L.latLngBounds(a.bounds)); panel.classList.remove('open');
+        map.fitBounds(L.latLngBounds(a.bounds)); sheetTo('peek');
       });
       li.querySelector('[data-del]').addEventListener('click', async () => { await OfflineStore.deleteArea(a.id); refreshOfflineInfo(); });
       areasEl.appendChild(li);
@@ -1344,10 +1407,15 @@ ${pms}
     }
   }
   saveBtn.addEventListener('click', saveArea);
-  document.getElementById('clearOffline').addEventListener('click', async () => {
-    if (!confirm('Delete all saved offline maps and data from this device?')) return;
-    await OfflineStore.clearAll(); refreshOfflineInfo();
-  });
+  {
+    const clearBtn = document.getElementById('clearOffline'), box = document.getElementById('clearConfirm');
+    const show = (on) => { box.hidden = !on; clearBtn.hidden = on; };
+    clearBtn.addEventListener('click', () => { show(true); document.getElementById('clearNo').focus(); });
+    document.getElementById('clearNo').addEventListener('click', () => { show(false); clearBtn.focus(); });
+    document.getElementById('clearYes').addEventListener('click', async () => {
+      await OfflineStore.clearAll(); refreshOfflineInfo(); show(false); clearBtn.focus();
+    });
+  }
   window.addEventListener('online', refreshAll);
   window.addEventListener('offline', () => { statusEl.textContent = 'No signal — showing saved data.'; });
 
