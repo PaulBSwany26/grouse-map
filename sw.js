@@ -7,7 +7,7 @@
  *  - Feature data (stands, sales, land…) is stored by the app itself in IndexedDB, not here.
  * Bump VERSION whenever app files change so phones pick up the update.
  */
-const VERSION = 'v11-d20261116';
+const VERSION = 'v11-d20261123';
 const SHELL = `grouse-shell-${VERSION}`;
 const TILES = 'grouse-tiles';
 
